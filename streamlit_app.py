@@ -81,8 +81,7 @@ def _save_secrets_to_disk(values: Dict[str, str]) -> None:
 def _init_session_state() -> None:
     """Initialise credential keys in st.session_state.
 
-    Idempotent: safe to call on every rerun. Uses .setdefault so
-    existing user input is preserved, but any key missing from a
+    Idempotent: safe to call on every rerun. Any key missing from a
     stale session (e.g. after a code update that adds a new key) is
     populated with the default from _load_saved_secrets().
     """
@@ -92,7 +91,40 @@ def _init_session_state() -> None:
             st.session_state[k] = v
 
 
+def _claude_agent_sdk_available() -> bool:
+    try:
+        import claude_agent_sdk  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 _init_session_state()
+
+
+# ---------------------------------------------------------------------------
+# Auto-pick subscription mode when the Claude Agent SDK is importable.
+#
+# The old radio widget was sticky — once a user clicked "Anthropic API key"
+# its state survived reruns even if session_state.auth_mode was reset. To
+# kill that class of bug we:
+#   1. Use a versioned widget key (_radio_vN). Bumping N forcibly discards
+#      any old widget state left over from a previous version of this file.
+#   2. If claude-agent-sdk is importable, we hard-seed the widget to
+#      subscription mode so it visually matches the backend that will
+#      actually run.
+# ---------------------------------------------------------------------------
+_RADIO_KEY = "auth_mode_radio_v3"
+_LABEL_SUB = "Claude.ai subscription (Claude Code)"
+_LABEL_API = "Anthropic API key (pay-per-token)"
+
+if _RADIO_KEY not in st.session_state:
+    if _claude_agent_sdk_available():
+        st.session_state[_RADIO_KEY] = _LABEL_SUB
+        st.session_state.auth_mode = "subscription"
+    else:
+        st.session_state[_RADIO_KEY] = _LABEL_API
+        st.session_state.auth_mode = "api"
 
 
 # ---------------------------------------------------------------------------
@@ -107,13 +139,10 @@ st.sidebar.markdown(
 )
 
 # --- Claude authentication mode --------------------------------------------
-auth_mode_label = st.sidebar.radio(
+st.sidebar.radio(
     "Claude authentication",
-    options=[
-        "Claude.ai subscription (Claude Code)",
-        "Anthropic API key (pay-per-token)",
-    ],
-    index=0 if st.session_state.auth_mode == "subscription" else 1,
+    options=[_LABEL_SUB, _LABEL_API],
+    key=_RADIO_KEY,  # widget value is the single source of truth
     help=(
         "Subscription mode routes every Claude call through the Claude "
         "Code CLI, so usage counts against your Claude.ai plan instead "
@@ -122,8 +151,12 @@ auth_mode_label = st.sidebar.radio(
         "API directly and bills per token."
     ),
 )
+# Derive auth_mode straight from the widget value so there's no way
+# for the two to disagree.
 st.session_state.auth_mode = (
-    "subscription" if auth_mode_label.startswith("Claude.ai") else "api"
+    "subscription"
+    if st.session_state[_RADIO_KEY].startswith("Claude.ai")
+    else "api"
 )
 
 if st.session_state.auth_mode == "subscription":
@@ -212,17 +245,6 @@ def _credentials_ok() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code install detection (subscription mode only)
-# ---------------------------------------------------------------------------
-def _claude_agent_sdk_installed() -> bool:
-    try:
-        import claude_agent_sdk  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
 # Main header
 # ---------------------------------------------------------------------------
 st.title("🧠 Jira RAG Agent")
@@ -233,7 +255,7 @@ if st.session_state.auth_mode == "subscription":
         "**Auth mode: Claude.ai subscription (Claude Code)** — no API key "
         "needed. Calls count against your Claude.ai plan."
     )
-    if not _claude_agent_sdk_installed():
+    if not _claude_agent_sdk_available():
         st.error(
             "⚠️ `claude-agent-sdk` is not installed in this Python venv, "
             "so subscription mode cannot make LLM calls. Fix it with one "
