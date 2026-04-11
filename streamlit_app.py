@@ -55,7 +55,13 @@ def _load_saved_secrets() -> Dict[str, str]:
         sec = st.secrets
         for k in defaults:
             if k in sec:
-                defaults[k] = str(sec[k])
+                val = str(sec[k])
+                # Normalise auth_mode — only "api" or "subscription"
+                # are legal. Anything else (missing / typo / old
+                # secrets file) falls back to "subscription".
+                if k == "auth_mode" and val not in ("api", "subscription"):
+                    val = "subscription"
+                defaults[k] = val
     except Exception:
         pass
     return defaults
@@ -136,6 +142,10 @@ st.session_state.jira_token = st.sidebar.text_input(
     type="password",
     help="Generate at https://id.atlassian.com/manage-profile/security/api-tokens",
 )
+
+# API key field is rendered ONLY in api mode. In subscription mode we
+# actively clear any leftover anthropic_key from session state so it
+# can't accidentally leak into the environment.
 if st.session_state.auth_mode == "api":
     st.session_state.anthropic_key = st.sidebar.text_input(
         "Anthropic API key",
@@ -144,9 +154,12 @@ if st.session_state.auth_mode == "api":
         help="Generate at https://console.anthropic.com/settings/keys",
     )
 else:
-    st.sidebar.caption(
-        "No API key needed — Claude calls use your `claude /login` session."
+    st.sidebar.success(
+        "✅ Subscription mode — no API key required. Calls use your "
+        "`claude /login` session."
     )
+    st.session_state.anthropic_key = ""
+
 st.session_state.model = st.sidebar.text_input(
     "Claude model",
     value=st.session_state.model,
@@ -194,18 +207,77 @@ def _credentials_ok() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Claude Code install detection (subscription mode only)
+# ---------------------------------------------------------------------------
+def _claude_agent_sdk_installed() -> bool:
+    try:
+        import claude_agent_sdk  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Main header
 # ---------------------------------------------------------------------------
 st.title("🧠 Jira RAG Agent")
+
+# Prominent mode banner so the user always knows what they're using.
+if st.session_state.auth_mode == "subscription":
+    st.success(
+        "**Auth mode: Claude.ai subscription (Claude Code)** — no API key "
+        "needed. Calls count against your Claude.ai plan."
+    )
+    if not _claude_agent_sdk_installed():
+        st.error(
+            "⚠️ `claude-agent-sdk` is not installed in this Python venv, "
+            "so subscription mode cannot make LLM calls. Fix it with one "
+            "of these:\n\n"
+            "1. Open a VS Code terminal (Terminal → New Terminal) and run:\n"
+            "   ```\n"
+            "   pip install claude-agent-sdk\n"
+            "   ```\n"
+            "2. Then make sure Claude Code itself is installed and you're "
+            "logged in:\n"
+            "   ```\n"
+            "   npm install -g @anthropic-ai/claude-code\n"
+            "   claude /login\n"
+            "   ```\n"
+            "3. Restart the Streamlit app (Shift + F5, then F5 again).\n\n"
+            "Alternatively, flip the **Claude authentication** radio in "
+            "the sidebar to *'Anthropic API key'* and paste a key."
+        )
+        st.stop()
+else:
+    st.info(
+        "**Auth mode: Anthropic API key** — each call is billed per "
+        "token against the key below. Switch to subscription mode in "
+        "the sidebar if you'd rather use your Claude.ai plan."
+    )
+
 st.caption(
     "Analyze and compare Jira epics with Claude. Uses a tool-use loop so "
     "Claude picks the right tool (analyzer / comparator) for your prompt."
 )
 
 if not _credentials_ok():
+    missing = []
+    if not st.session_state.jira_host:
+        missing.append("Jira URL")
+    if not st.session_state.jira_email:
+        missing.append("Jira email")
+    if not st.session_state.jira_token:
+        missing.append("Jira API token")
+    if (
+        st.session_state.auth_mode == "api"
+        and not st.session_state.anthropic_key
+    ):
+        missing.append("Anthropic API key")
     st.info(
-        "Fill in the credentials in the left sidebar and click **Use for "
-        "session** or **Save to disk**. Then come back here."
+        "Missing credentials: **"
+        + ", ".join(missing)
+        + "**. Fill them in the left sidebar and click **Use for session** "
+        "or **Save to disk**."
     )
     st.stop()
 
