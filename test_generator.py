@@ -33,6 +33,62 @@ def _strip_json_fence(text: str) -> str:
     return t.strip()
 
 
+def _format_extras_block(ticket_data: Dict[str, Any]) -> str:
+    """Render optional context (subtasks, linked issues, attachments)
+    into a text block suitable for inclusion in any prompt. Each
+    section is only emitted if it's non-empty, so toggling a
+    ContextOptions flag cleanly removes it from the prompt.
+    """
+    lines: List[str] = []
+
+    subtasks = ticket_data.get("subtasks") or []
+    if subtasks:
+        lines.append("\nCHILD TICKETS (subtasks):")
+        for s in subtasks:
+            lines.append(
+                f"- {s.get('key', '')} [{s.get('status', '')}] "
+                f"{s.get('summary', '')}"
+                + (
+                    f" (assignee: {s.get('assignee', '')})"
+                    if s.get("assignee")
+                    else ""
+                )
+            )
+
+    linked = ticket_data.get("linked_issues") or []
+    if linked:
+        lines.append("\nLINKED TICKETS:")
+        for l in linked:
+            link_type = l.get("link_type") or l.get("direction") or ""
+            lines.append(
+                f"- {l.get('key', '')} [{l.get('status', '')}] "
+                f"({link_type}) {l.get('summary', '')}"
+            )
+
+    attachments = ticket_data.get("attachments") or []
+    if attachments:
+        lines.append("\nATTACHMENTS:")
+        for a in attachments:
+            size_kb = (a.get("size", 0) or 0) / 1024.0
+            lines.append(
+                f"- {a.get('filename', '')} "
+                f"({a.get('mime_type', '')}, {size_kb:.1f} KB) "
+                f"by {a.get('author', '')}"
+            )
+            if a.get("text_content"):
+                # Indent file contents so Claude knows where the
+                # attachment body starts and ends.
+                text = a["text_content"]
+                lines.append("  --- file contents ---")
+                for ln in text.splitlines()[:200]:  # safety cap per file
+                    lines.append(f"  {ln}")
+                if len(text.splitlines()) > 200:
+                    lines.append("  ...[truncated]")
+                lines.append("  --- end of file ---")
+
+    return "\n".join(lines)
+
+
 class TestCaseGenerator:
     def __init__(self):
         """Initialize LLM for test case generation.
@@ -418,7 +474,8 @@ class TestCaseGenerator:
             f"- Description: {ticket_data.get('description', 'N/A')}\n"
             f"- Acceptance Criteria: {ticket_data.get('acceptance_criteria', 'N/A')}\n"
             f"- Issue Type: {ticket_data.get('issue_type', 'N/A')}\n"
-            f"- Priority: {ticket_data.get('priority', 'N/A')}\n\n"
+            f"- Priority: {ticket_data.get('priority', 'N/A')}\n"
+            f"{_format_extras_block(ticket_data)}\n\n"
             f"CONTEXT FROM RAG:\n{context}\n\n"
             f"Generate {config.MIN_TEST_CASES_PER_TICKET} to "
             f"{config.MAX_TEST_CASES_PER_TICKET} test cases in the following "
@@ -466,7 +523,8 @@ class TestCaseGenerator:
             f"- Issue Type: {ticket_data.get('issue_type', 'N/A')}\n"
             f"- Priority: {ticket_data.get('priority', 'N/A')}\n"
             f"- Status: {ticket_data.get('status', 'N/A')}\n"
-            f"- Labels: {labels}\n\n"
+            f"- Labels: {labels}\n"
+            f"{_format_extras_block(ticket_data)}\n\n"
             f"COMMENTS:\n{comment_text}\n\n"
             f"CHANGELOG:\n{changelog_text}\n\n"
             f"RAG CONTEXT:\n{context}\n\n"
@@ -485,7 +543,8 @@ class TestCaseGenerator:
             f"- Summary: {ticket_data.get('summary', 'N/A')}\n"
             f"- Description: {ticket_data.get('description', 'N/A')}\n"
             f"- Acceptance Criteria: {ticket_data.get('acceptance_criteria', 'N/A')}\n"
-            f"- Issue Type: {ticket_data.get('issue_type', 'N/A')}\n\n"
+            f"- Issue Type: {ticket_data.get('issue_type', 'N/A')}\n"
+            f"{_format_extras_block(ticket_data)}\n\n"
             f"CONTEXT FROM RAG:\n{context}\n\n"
             "Generate edge cases in the following JSON format:\n"
             '{\n'
@@ -524,7 +583,8 @@ class TestCaseGenerator:
             f"- Summary: {ticket_data.get('summary', 'N/A')}\n"
             f"- Description: {ticket_data.get('description', 'N/A')}\n"
             f"- Type: {ticket_data.get('issue_type', 'N/A')}\n"
-            f"- Status: {ticket_data.get('status', 'N/A')}\n\n"
+            f"- Status: {ticket_data.get('status', 'N/A')}\n"
+            f"{_format_extras_block(ticket_data)}\n\n"
             f"CHANGELOG:\n{changelog_text}\n\n"
             f"RELATED CONTEXT:\n{context}\n\n"
             "Generate regression analysis in the following JSON format:\n"
@@ -568,7 +628,8 @@ class TestCaseGenerator:
             f"- Description: {ticket_data.get('description', 'N/A')}\n"
             f"- Type: {ticket_data.get('issue_type', 'N/A')}\n"
             f"- Priority: {ticket_data.get('priority', 'N/A')}\n"
-            f"- Status: {ticket_data.get('status', 'N/A')}\n\n"
+            f"- Status: {ticket_data.get('status', 'N/A')}\n"
+            f"{_format_extras_block(ticket_data)}\n\n"
             f"COMMENTS:\n{comment_text}\n\n"
             f"CHANGELOG:\n{changelog_text}\n\n"
             f"DEPENDENCIES AND RELATIONSHIPS:\n{context}\n\n"

@@ -10,7 +10,8 @@ Given an epic key, the agent:
   4. Returns a single structured results dict and can format a report.
 """
 import logging
-from typing import List, Dict, Any
+from dataclasses import dataclass, asdict
+from typing import List, Dict, Any, Optional, Tuple
 
 from jira_client import JiraClient
 from vector_store import VectorStore
@@ -20,21 +21,109 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ContextOptions:
+    """What extra Jira context to pull in alongside the main ticket
+    fields when running the analyzer / comparator pipeline.
+
+    All toggles default to on for the "obvious" context (subtasks,
+    linked issues, comments, changelog). Attachments are off by default
+    because downloading text content costs bandwidth and can surprise
+    users.
+    """
+    include_subtasks: bool = True
+    include_linked: bool = True
+    include_comments: bool = True
+    include_changelog: bool = True
+    include_attachments: bool = False
+
+    def cache_key(self) -> Tuple[bool, bool, bool, bool, bool]:
+        return (
+            self.include_subtasks,
+            self.include_linked,
+            self.include_comments,
+            self.include_changelog,
+            self.include_attachments,
+        )
+
+    def as_dict(self) -> Dict[str, bool]:
+        return asdict(self)
+
+
+DEFAULT_CONTEXT_OPTIONS = ContextOptions()
+
+
 class JiraRAGAgent:
     def __init__(self):
         """Initialize RAG agent components"""
         self.jira_client = JiraClient()
         self.vector_store = VectorStore()
         self.test_generator = TestCaseGenerator()
+        # Raw Jira data cache — populated once per epic, reused across
+        # different context-option combinations.
+        self._jira_cache: Dict[str, Dict[str, Any]] = {}
         logger.info("RAG Agent initialized")
 
-    def process_epic(self, epic_key: str) -> Dict[str, Any]:
-        """Main method to process an epic and generate analysis and test cases"""
+    def fetch_epic_data(self, epic_key: str) -> Dict[str, Any]:
+        """Fetch raw Jira data for an epic — epic details, tickets,
+        subtasks, linked issues, comments, changelog, and attachments.
+
+        Cached per epic_key so re-running the analyzer with different
+        context options reuses the same Jira fetch. To force a re-fetch
+        (e.g. the epic was updated), call `invalidate(epic_key)` first.
+        """
+        if epic_key in self._jira_cache:
+            return self._jira_cache[epic_key]
+
+        logger.info(f"Fetching Jira data for epic: {epic_key}")
+        epic_details = self.jira_client.get_epic_details(epic_key)
+        tickets = self.jira_client.get_epic_issues(epic_key)
+        logger.info(f"Found {len(tickets)} tickets for epic {epic_key}")
+
+        # Eagerly load per-ticket context. This is cheap compared to
+        # the LLM calls that follow, and it lets us swap context options
+        # later without re-hitting Jira.
+        for ticket in tickets:
+            key = ticket.get("key", "")
+            if not key:
+                continue
+            ticket["comments"] = self.jira_client.get_issue_comments(key)
+            ticket["changelog"] = self.jira_client.get_issue_changelog(key)
+            ticket["attachments"] = self.jira_client.get_issue_attachments(key)
+
+        data = {
+            "epic_key": epic_key,
+            "epic_details": epic_details,
+            "tickets": tickets,
+        }
+        self._jira_cache[epic_key] = data
+        return data
+
+    def invalidate(self, epic_key: Optional[str] = None) -> None:
+        """Drop the Jira cache for one epic or everything."""
+        if epic_key is None:
+            self._jira_cache.clear()
+        else:
+            self._jira_cache.pop(epic_key, None)
+
+    def process_epic(
+        self,
+        epic_key: str,
+        context_options: Optional[ContextOptions] = None,
+    ) -> Dict[str, Any]:
+        """Main method to process an epic and generate analysis and test cases.
+
+        Args:
+            epic_key: Jira epic key.
+            context_options: Which extra context sections to include
+                when prompting Claude per ticket. Defaults to
+                DEFAULT_CONTEXT_OPTIONS (everything except attachments).
+        """
+        opts = context_options or DEFAULT_CONTEXT_OPTIONS
         try:
-            logger.info(f"Processing epic: {epic_key}")
-            epic_details = self.jira_client.get_epic_details(epic_key)
-            tickets = self.jira_client.get_epic_issues(epic_key)
-            logger.info(f"Found {len(tickets)} tickets for epic {epic_key}")
+            data = self.fetch_epic_data(epic_key)
+            epic_details = data["epic_details"]
+            tickets = data["tickets"]
 
             documents = self._prepare_documents(epic_details, tickets)
             self.vector_store.clear_collection()
@@ -43,18 +132,40 @@ class JiraRAGAgent:
             results: Dict[str, Any] = {
                 "epic_key": epic_key,
                 "epic_details": epic_details,
+                "context_options": opts.as_dict(),
                 "tickets": {},
             }
 
             for ticket in tickets:
                 logger.info(f"Processing ticket: {ticket.get('key', '')}")
-                results["tickets"][ticket["key"]] = self._process_ticket(ticket)
+                filtered = self._filter_ticket(ticket, opts)
+                results["tickets"][ticket["key"]] = self._process_ticket(filtered)
 
             logger.info(f"Completed processing epic {epic_key}")
             return results
         except Exception as e:
             logger.error(f"Failed to process epic {epic_key}: {str(e)}")
             return {"epic_key": epic_key, "error": str(e)}
+
+    def _filter_ticket(
+        self, ticket: Dict[str, Any], opts: ContextOptions
+    ) -> Dict[str, Any]:
+        """Return a copy of the ticket dict with optional context
+        sections zeroed out per ContextOptions. The filtered dict is
+        what gets passed to test_generator so prompts see only what
+        the user asked for."""
+        filtered = dict(ticket)
+        if not opts.include_subtasks:
+            filtered["subtasks"] = []
+        if not opts.include_linked:
+            filtered["linked_issues"] = []
+        if not opts.include_comments:
+            filtered["comments"] = []
+        if not opts.include_changelog:
+            filtered["changelog"] = []
+        if not opts.include_attachments:
+            filtered["attachments"] = []
+        return filtered
 
     def _prepare_documents(
         self, epic_details: Dict[str, Any], tickets: List[Dict[str, Any]]
@@ -101,11 +212,19 @@ class JiraRAGAgent:
         return documents
 
     def _process_ticket(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
-        """Process individual ticket with analysis and test cases"""
+        """Process individual ticket with analysis and test cases.
+
+        `ticket` is the already-filtered dict from `_filter_ticket`, so
+        whichever of subtasks / linked_issues / comments / changelog /
+        attachments are empty reflect the user's ContextOptions
+        choices. We pull comments/changelog off the dict (they were
+        fetched once in `fetch_epic_data`) and pass the full filtered
+        ticket into the test generator so its prompts can cite
+        subtasks, linked issues, and attachments when enabled.
+        """
         try:
-            key = ticket.get("key", "")
-            comments = self.jira_client.get_issue_comments(key)
-            changelog = self.jira_client.get_issue_changelog(key)
+            comments = ticket.get("comments", []) or []
+            changelog = ticket.get("changelog", []) or []
 
             query = f"{ticket.get('summary', '')} {ticket.get('description', '')}"
             context = self.vector_store.search(query)

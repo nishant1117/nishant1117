@@ -30,7 +30,7 @@ from typing import Any, Dict, List
 
 from config import config
 from llm_client import get_backend
-from rag_agent import JiraRAGAgent
+from rag_agent import ContextOptions, DEFAULT_CONTEXT_OPTIONS, JiraRAGAgent
 from test_generator import TestCaseGenerator
 
 logging.basicConfig(
@@ -88,6 +88,29 @@ TOOLS: List[Dict[str, Any]] = [
                         "integrity risks?'). Leave unset if not needed."
                     ),
                 },
+                "include_subtasks": {
+                    "type": "boolean",
+                    "description": "Include child tickets (subtasks). Default true.",
+                },
+                "include_linked": {
+                    "type": "boolean",
+                    "description": "Include linked tickets. Default true.",
+                },
+                "include_comments": {
+                    "type": "boolean",
+                    "description": "Include ticket comments. Default true.",
+                },
+                "include_changelog": {
+                    "type": "boolean",
+                    "description": "Include the ticket change history. Default true.",
+                },
+                "include_attachments": {
+                    "type": "boolean",
+                    "description": (
+                        "Include file attachments. Text files are inlined; "
+                        "binaries are referenced by filename. Default false."
+                    ),
+                },
             },
             "required": ["epic_key", "focus"],
         },
@@ -121,6 +144,29 @@ TOOLS: List[Dict[str, Any]] = [
         },
     },
 ]
+
+
+def _extract_context_options(tool_input: Dict[str, Any]) -> ContextOptions:
+    """Pull the optional context-include flags out of a tool_input
+    dict and build a ContextOptions with the defaults as fallbacks."""
+    default = DEFAULT_CONTEXT_OPTIONS
+    return ContextOptions(
+        include_subtasks=bool(
+            tool_input.get("include_subtasks", default.include_subtasks)
+        ),
+        include_linked=bool(
+            tool_input.get("include_linked", default.include_linked)
+        ),
+        include_comments=bool(
+            tool_input.get("include_comments", default.include_comments)
+        ),
+        include_changelog=bool(
+            tool_input.get("include_changelog", default.include_changelog)
+        ),
+        include_attachments=bool(
+            tool_input.get("include_attachments", default.include_attachments)
+        ),
+    )
 
 
 SYSTEM_PROMPT = textwrap.dedent(
@@ -160,7 +206,11 @@ class AgentSession:
     def __init__(self) -> None:
         self._agent: JiraRAGAgent | None = None
         self._tg: TestCaseGenerator | None = None
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        # Cache keyed by (epic_key, context_options.cache_key()) so
+        # toggling context checkboxes triggers a fresh LLM pass while
+        # raw Jira data is still reused from the inner JiraRAGAgent
+        # cache.
+        self._cache: Dict[tuple, Dict[str, Any]] = {}
 
     # Lazy init so `--help` etc. do not require API keys.
     @property
@@ -175,10 +225,18 @@ class AgentSession:
             self._tg = TestCaseGenerator()
         return self._tg
 
-    def ensure_processed(self, epic_key: str) -> Dict[str, Any]:
-        if epic_key not in self._cache:
-            self._cache[epic_key] = self.agent.process_epic(epic_key)
-        return self._cache[epic_key]
+    def ensure_processed(
+        self,
+        epic_key: str,
+        context_options: ContextOptions | None = None,
+    ) -> Dict[str, Any]:
+        opts = context_options or DEFAULT_CONTEXT_OPTIONS
+        key = (epic_key, opts.cache_key())
+        if key not in self._cache:
+            self._cache[key] = self.agent.process_epic(
+                epic_key, context_options=opts
+            )
+        return self._cache[key]
 
     # ------------------------------------------------------------------
     def run_analyzer(
@@ -186,8 +244,9 @@ class AgentSession:
         epic_key: str,
         focus: str,
         custom_question: str | None = None,
+        context_options: ContextOptions | None = None,
     ) -> Dict[str, Any]:
-        results = self.ensure_processed(epic_key)
+        results = self.ensure_processed(epic_key, context_options)
         if "error" in results:
             return {"error": results["error"], "epic_key": epic_key}
 
@@ -286,9 +345,10 @@ class AgentSession:
         epic_key_1: str,
         epic_key_2: str,
         comparison_goal: str | None = None,
+        context_options: ContextOptions | None = None,
     ) -> Dict[str, Any]:
-        r1 = self.ensure_processed(epic_key_1)
-        r2 = self.ensure_processed(epic_key_2)
+        r1 = self.ensure_processed(epic_key_1, context_options)
+        r2 = self.ensure_processed(epic_key_2, context_options)
         if "error" in r1 or "error" in r2:
             return {
                 "error": "Failed to load one of the epics",
@@ -330,17 +390,20 @@ class AgentSession:
     # ------------------------------------------------------------------
     def dispatch(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         try:
+            opts = _extract_context_options(tool_input)
             if tool_name == "analyzer":
                 return self.run_analyzer(
                     epic_key=tool_input["epic_key"],
                     focus=tool_input.get("focus", "summary"),
                     custom_question=tool_input.get("custom_question"),
+                    context_options=opts,
                 )
             if tool_name == "comparator":
                 return self.run_comparator(
                     epic_key_1=tool_input["epic_key_1"],
                     epic_key_2=tool_input["epic_key_2"],
                     comparison_goal=tool_input.get("comparison_goal"),
+                    context_options=opts,
                 )
             return {"error": f"Unknown tool: {tool_name}"}
         except Exception as e:

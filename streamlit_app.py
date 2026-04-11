@@ -217,6 +217,7 @@ if not _credentials_ok():
 try:
     from agent_cli import AgentSession, run_turn
     from llm_client import get_backend
+    from rag_agent import ContextOptions
 except Exception as e:  # pragma: no cover
     st.error(f"Failed to import agent modules: {e}")
     st.code(traceback.format_exc())
@@ -372,6 +373,52 @@ with tab_analyze:
         placeholder="e.g. Which tickets carry the highest data-integrity risk?",
     )
 
+    with st.expander("➕ Add extra context to the analysis", expanded=True):
+        st.caption(
+            "Toggle which extra Jira data to feed into Claude alongside the "
+            "ticket fields. More context = more grounded answers, but "
+            "slower and uses more of your Claude quota. Changing these "
+            "options re-runs the analysis."
+        )
+        col_l, col_r = st.columns(2)
+        include_subtasks = col_l.checkbox(
+            "👶 Child tickets (subtasks)",
+            value=True,
+            help="Pull in each ticket's subtasks with key, status, and summary.",
+        )
+        include_linked = col_l.checkbox(
+            "🔗 Linked tickets",
+            value=True,
+            help="Include linked issues (blocks, is-blocked-by, relates-to, etc).",
+        )
+        include_comments = col_l.checkbox(
+            "💬 Comments",
+            value=True,
+            help="Include every comment on each ticket (author + body).",
+        )
+        include_changelog = col_r.checkbox(
+            "📜 Changelog / history",
+            value=True,
+            help="Include the change history (field + from/to values).",
+        )
+        include_attachments = col_r.checkbox(
+            "📎 File attachments",
+            value=False,
+            help=(
+                "Include attachment metadata for every attachment, and inline "
+                "the text content of attachments that look like text files "
+                "(< 50 KB). Binary files are referenced by filename only."
+            ),
+        )
+
+    context_options = ContextOptions(
+        include_subtasks=include_subtasks,
+        include_linked=include_linked,
+        include_comments=include_comments,
+        include_changelog=include_changelog,
+        include_attachments=include_attachments,
+    )
+
     if st.button("Analyze", type="primary", disabled=not epic_key):
         with st.spinner(
             f"Processing {epic_key} — first run can take a few minutes..."
@@ -381,6 +428,7 @@ with tab_analyze:
                     epic_key.strip(),
                     focus,
                     custom_q.strip() or None,
+                    context_options=context_options,
                 )
             except Exception as e:
                 st.error(f"Analyzer failed: {e}")
@@ -427,6 +475,31 @@ with tab_compare:
         placeholder="e.g. Which has higher regression risk?",
     )
 
+    with st.expander("➕ Add extra context to the comparison", expanded=False):
+        col_l2, col_r2 = st.columns(2)
+        cmp_subtasks = col_l2.checkbox(
+            "👶 Child tickets", value=True, key="cmp_subtasks"
+        )
+        cmp_linked = col_l2.checkbox(
+            "🔗 Linked tickets", value=True, key="cmp_linked"
+        )
+        cmp_comments = col_l2.checkbox(
+            "💬 Comments", value=True, key="cmp_comments"
+        )
+        cmp_changelog = col_r2.checkbox(
+            "📜 Changelog", value=True, key="cmp_changelog"
+        )
+        cmp_attach = col_r2.checkbox(
+            "📎 Attachments", value=False, key="cmp_attach"
+        )
+    compare_context = ContextOptions(
+        include_subtasks=cmp_subtasks,
+        include_linked=cmp_linked,
+        include_comments=cmp_comments,
+        include_changelog=cmp_changelog,
+        include_attachments=cmp_attach,
+    )
+
     if st.button(
         "Compare", type="primary", disabled=not (epic_1 and epic_2)
     ):
@@ -436,6 +509,7 @@ with tab_compare:
                     epic_1.strip(),
                     epic_2.strip(),
                     goal.strip() or None,
+                    context_options=compare_context,
                 )
             except Exception as e:
                 st.error(f"Comparator failed: {e}")
