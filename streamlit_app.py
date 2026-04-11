@@ -79,12 +79,17 @@ def _save_secrets_to_disk(values: Dict[str, str]) -> None:
 
 
 def _init_session_state() -> None:
-    if "_creds_loaded" in st.session_state:
-        return
+    """Initialise credential keys in st.session_state.
+
+    Idempotent: safe to call on every rerun. Uses .setdefault so
+    existing user input is preserved, but any key missing from a
+    stale session (e.g. after a code update that adds a new key) is
+    populated with the default from _load_saved_secrets().
+    """
     defaults = _load_saved_secrets()
     for k, v in defaults.items():
-        st.session_state.setdefault(k, v)
-    st.session_state._creds_loaded = True
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 _init_session_state()
@@ -314,10 +319,10 @@ def get_session_bundle(
 
 try:
     bundle = get_session_bundle(
-        st.session_state.auth_mode,
-        st.session_state.jira_host,
-        st.session_state.jira_email,
-        st.session_state.anthropic_key,
+        st.session_state.get("auth_mode", "subscription"),
+        st.session_state.get("jira_host", ""),
+        st.session_state.get("jira_email", ""),
+        st.session_state.get("anthropic_key", ""),
     )
     backend_name = get_backend().name
 except Exception as e:
