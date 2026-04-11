@@ -1,0 +1,65 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Agent CLI (interactive)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/agent_cli.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Agent CLI (one-shot prompt)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/agent_cli.py",
+            "args": [
+                "--prompt",
+                "${input:prompt}"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "FastAPI (uvicorn reload)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "api:app",
+                "--reload",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "FastAPI (direct python api.py)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/api.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "prompt",
+            "type": "promptString",
+            "description": "Prompt for the Jira RAG agent",
+            "default": "Analyze epic PROJ-123 and list the top regression risks"
+        }
+    ]
+}

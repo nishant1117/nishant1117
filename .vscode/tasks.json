@@ -1,0 +1,46 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Python: create venv",
+            "type": "shell",
+            "command": "python3 -m venv .venv",
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "Python: install requirements",
+            "type": "shell",
+            "command": "${workspaceFolder}/.venv/bin/pip install -r requirements.txt",
+            "windows": {
+                "command": "${workspaceFolder}\\.venv\\Scripts\\pip.exe install -r requirements.txt"
+            },
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "dependsOn": "Python: create venv"
+        },
+        {
+            "label": "Run: agent_cli (interactive)",
+            "type": "shell",
+            "command": "${workspaceFolder}/.venv/bin/python agent_cli.py",
+            "windows": {
+                "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe agent_cli.py"
+            },
+            "problemMatcher": [],
+            "group": "test"
+        },
+        {
+            "label": "Run: FastAPI (uvicorn --reload)",
+            "type": "shell",
+            "command": "${workspaceFolder}/.venv/bin/uvicorn api:app --reload --port 8000",
+            "windows": {
+                "command": "${workspaceFolder}\\.venv\\Scripts\\uvicorn.exe api:app --reload --port 8000"
+            },
+            "problemMatcher": [],
+            "group": "test"
+        }
+    ]
+}

@@ -1,0 +1,80 @@
+### Jira RAG Agent - REST Client scratchpad
+### (install the "REST Client" extension, then click "Send Request" above each block)
+
+@host = http://localhost:8000
+
+### Health
+GET {{host}}/health
+
+### Process an epic synchronously (returns results inline; may be slow)
+POST {{host}}/process-epic-sync
+Content-Type: application/json
+
+{
+    "epic_key": "PROJ-123"
+}
+
+### Process an epic in the background
+POST {{host}}/process-epic
+Content-Type: application/json
+
+{
+    "epic_key": "PROJ-123"
+}
+
+### Fetch cached results
+GET {{host}}/results/PROJ-123
+
+### Plain-text report
+GET {{host}}/generate-report/PROJ-123
+
+### Analyzer slices
+GET {{host}}/analysis/PROJ-123
+
+###
+GET {{host}}/edge-cases/PROJ-123
+
+###
+GET {{host}}/regression/PROJ-123
+
+###
+GET {{host}}/bug-analysis/PROJ-123
+
+###
+GET {{host}}/insights/PROJ-123
+
+###
+GET {{host}}/recommendations/PROJ-123
+
+###
+GET {{host}}/action-plan/PROJ-123
+
+### Comparator
+POST {{host}}/compare-epics
+Content-Type: application/json
+
+{
+    "epic_key_1": "PROJ-123",
+    "epic_key_2": "PROJ-456"
+}
+
+### Free-form custom question
+POST {{host}}/custom-analysis
+Content-Type: application/json
+
+{
+    "epic_key": "PROJ-123",
+    "custom_prompt": "Which tickets carry the highest data integrity risk and why?"
+}
+
+### Impact analysis for a set of proposed changes
+POST {{host}}/impact-analysis
+Content-Type: application/json
+
+{
+    "epic_key": "PROJ-123",
+    "changes": [
+        "Switch auth provider from Auth0 to Keycloak",
+        "Migrate user table to UUID primary keys"
+    ]
+}
