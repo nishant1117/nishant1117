@@ -13,10 +13,8 @@ import json
 import logging
 from typing import List, Dict, Any
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
-
 from config import config
+from llm_client import get_backend
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +35,13 @@ def _strip_json_fence(text: str) -> str:
 
 class TestCaseGenerator:
     def __init__(self):
-        """Initialize LLM for test case generation"""
-        self.llm = ChatAnthropic(
-            model=config.CLAUDE_MODEL,
-            anthropic_api_key=config.ANTHROPIC_API_KEY,
-            max_tokens=4096,
-        )
+        """Initialize LLM for test case generation.
+
+        Resolves the backend lazily via `llm_client.get_backend()` so
+        the same class works against either the Anthropic API or a
+        Claude.ai subscription (via Claude Code).
+        """
+        self.llm = get_backend()
 
     # ------------------------------------------------------------------
     # Core generation methods
@@ -56,18 +55,13 @@ class TestCaseGenerator:
                 c.get("content", "") for c in context
             ) or "No additional context available"
             prompt = self._create_test_case_prompt(ticket_data, context_text)
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert QA engineer specializing in test case "
-                        "creation. Create comprehensive, detailed, and practical "
-                        "test cases."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_test_cases(response.content)
+            system = (
+                "You are an expert QA engineer specializing in test case "
+                "creation. Create comprehensive, detailed, and practical "
+                "test cases."
+            )
+            response_text = self.llm.complete(system, prompt)
+            parsed = self._parse_test_cases(response_text)
             logger.info(
                 f"Generated {len(parsed.get('test_cases', []))} test cases for "
                 f"{ticket_data.get('key', 'unknown')}"
@@ -92,18 +86,13 @@ class TestCaseGenerator:
             prompt = self._create_analysis_prompt(
                 ticket_data, comments, changelog, context_text
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert software analyst. Provide comprehensive "
-                        "analysis including key data points, requirements, test "
-                        "scenarios, and risk assessment."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_analysis(response.content)
+            system = (
+                "You are an expert software analyst. Provide comprehensive "
+                "analysis including key data points, requirements, test "
+                "scenarios, and risk assessment."
+            )
+            response_text = self.llm.complete(system, prompt)
+            parsed = self._parse_analysis(response_text)
             logger.info(
                 f"Generated detailed analysis for "
                 f"{ticket_data.get('key', 'unknown')}"
@@ -122,18 +111,13 @@ class TestCaseGenerator:
                 c.get("content", "") for c in context
             ) or "No additional context available"
             prompt = self._create_edge_case_prompt(ticket_data, context_text)
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert QA engineer specializing in edge case "
-                        "identification and boundary testing. Identify all critical "
-                        "edge cases and boundary conditions."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_edge_cases(response.content)
+            system = (
+                "You are an expert QA engineer specializing in edge case "
+                "identification and boundary testing. Identify all critical "
+                "edge cases and boundary conditions."
+            )
+            response_text = self.llm.complete(system, prompt)
+            parsed = self._parse_edge_cases(response_text)
             logger.info(
                 f"Generated {len(parsed.get('edge_cases', []))} edge cases for "
                 f"{ticket_data.get('key', 'unknown')}"
@@ -157,18 +141,13 @@ class TestCaseGenerator:
             prompt = self._create_regression_prompt(
                 ticket_data, changelog, context_text
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert regression testing specialist. Analyze "
-                        "potential regression risks, affected areas, and required "
-                        "regression test coverage."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_regression_analysis(response.content)
+            system = (
+                "You are an expert regression testing specialist. Analyze "
+                "potential regression risks, affected areas, and required "
+                "regression test coverage."
+            )
+            response_text = self.llm.complete(system, prompt)
+            parsed = self._parse_regression_analysis(response_text)
             logger.info(
                 f"Generated regression analysis for "
                 f"{ticket_data.get('key', 'unknown')}"
@@ -193,18 +172,13 @@ class TestCaseGenerator:
             prompt = self._create_bug_detection_prompt(
                 ticket_data, comments, changelog, context_text
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert bug detection specialist and security "
-                        "researcher. Identify potential bugs, vulnerabilities, and "
-                        "issues based on dependencies and test scenarios."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_bug_analysis(response.content)
+            system = (
+                "You are an expert bug detection specialist and security "
+                "researcher. Identify potential bugs, vulnerabilities, and "
+                "issues based on dependencies and test scenarios."
+            )
+            response_text = self.llm.complete(system, prompt)
+            parsed = self._parse_bug_analysis(response_text)
             logger.info(
                 f"Generated bug detection analysis for "
                 f"{ticket_data.get('key', 'unknown')}"
@@ -233,18 +207,13 @@ class TestCaseGenerator:
             prompt = self._create_comparison_prompt(
                 epic1_data, epic2_data, ctx1, ctx2
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert software architect and project manager. "
-                        "Provide comprehensive comparison analysis between two epics "
-                        "with delta analysis, risk assessment, and recommendations."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_comparison_analysis(response.content)
+            system = (
+                "You are an expert software architect and project manager. "
+                "Provide comprehensive comparison analysis between two epics "
+                "with delta analysis, risk assessment, and recommendations."
+            )
+            response_text = self.llm.complete(system, prompt)
+            parsed = self._parse_comparison_analysis(response_text)
             logger.info(
                 f"Generated comparison analysis for "
                 f"{epic1_data.get('key', '?')} vs {epic2_data.get('key', '?')}"
@@ -286,21 +255,15 @@ class TestCaseGenerator:
                 f"\n\nRAG Context:\n{ctx}"
             )
 
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are a helpful software engineering analyst. Answer the "
-                        "user's question about the ticket using only the provided "
-                        "data. Return JSON when structured output is useful, "
-                        "otherwise plain prose."
-                    )
-                ),
-                HumanMessage(
-                    content=f"{custom_prompt}\n\n{ticket_block}"
-                ),
-            ]
-            response = self.llm.invoke(messages)
-            parsed = self._parse_custom_analysis(response.content)
+            system = (
+                "You are a helpful software engineering analyst. Answer the "
+                "user's question about the ticket using only the provided "
+                "data. Return JSON when structured output is useful, "
+                "otherwise plain prose."
+            )
+            user_prompt = f"{custom_prompt}\n\n{ticket_block}"
+            response_text = self.llm.complete(system, user_prompt)
+            parsed = self._parse_custom_analysis(response_text)
             logger.info(
                 f"Generated custom analysis for {ticket_data.get('key', 'unknown')}"
             )
@@ -331,17 +294,12 @@ class TestCaseGenerator:
                 "\n\nProvide insights as JSON with keys: key_observations, "
                 "quality_risks, coverage_gaps, strategic_recommendations."
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are a senior engineering insights analyst. Surface "
-                        "the non-obvious patterns in the data."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            return self._parse_insights(response.content)
+            system = (
+                "You are a senior engineering insights analyst. Surface "
+                "the non-obvious patterns in the data."
+            )
+            response_text = self.llm.complete(system, prompt)
+            return self._parse_insights(response_text)
         except Exception as e:
             logger.error(f"Failed to generate insights: {str(e)}")
             return {"error": str(e)}
@@ -374,19 +332,14 @@ class TestCaseGenerator:
                 "- Resource requirements\n\n"
                 "Return as JSON with structured recommendations."
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an experienced software engineer and consultant. "
-                        "Provide practical, actionable recommendations that teams "
-                        "can implement."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
+            system = (
+                "You are an experienced software engineer and consultant. "
+                "Provide practical, actionable recommendations that teams "
+                "can implement."
+            )
+            response_text = self.llm.complete(system, prompt)
             logger.info("Generated recommendations")
-            return self._parse_recommendations(response.content)
+            return self._parse_recommendations(response_text)
         except Exception as e:
             logger.error(f"Failed to generate recommendations: {str(e)}")
             return {"error": str(e)}
@@ -411,17 +364,12 @@ class TestCaseGenerator:
                 "6. SUCCESS METRICS\n\n"
                 "Return as JSON with detailed, time-ordered action steps."
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are a project orchestration expert. Create detailed, "
-                        "executable action plans that teams can follow."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
-            return self._parse_action_plan(response.content)
+            system = (
+                "You are a project orchestration expert. Create detailed, "
+                "executable action plans that teams can follow."
+            )
+            response_text = self.llm.complete(system, prompt)
+            return self._parse_action_plan(response_text)
         except Exception as e:
             logger.error(f"Failed to generate action plan: {str(e)}")
             return {"error": str(e)}
@@ -444,18 +392,13 @@ class TestCaseGenerator:
                 "direct_impact, ripple_effects, risk_implications, "
                 "testing_implications, deployment_considerations, stakeholder_impact."
             )
-            messages = [
-                SystemMessage(
-                    content=(
-                        "You are an expert in impact analysis. Provide thorough, "
-                        "thoughtful analysis of how changes affect systems."
-                    )
-                ),
-                HumanMessage(content=prompt),
-            ]
-            response = self.llm.invoke(messages)
+            system = (
+                "You are an expert in impact analysis. Provide thorough, "
+                "thoughtful analysis of how changes affect systems."
+            )
+            response_text = self.llm.complete(system, prompt)
             logger.info("Generated impact analysis")
-            return self._parse_impact_analysis(response.content)
+            return self._parse_impact_analysis(response_text)
         except Exception as e:
             logger.error(f"Failed to generate impact analysis: {str(e)}")
             return {"error": str(e)}

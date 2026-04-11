@@ -48,6 +48,7 @@ def _load_saved_secrets() -> Dict[str, str]:
         "jira_token": "",
         "anthropic_key": "",
         "model": "claude-sonnet-4-5",
+        "auth_mode": "subscription",
     }
     try:
         # st.secrets is dict-like; reading a missing key raises.
@@ -94,6 +95,32 @@ st.sidebar.markdown(
     "your computer)."
 )
 
+# --- Claude authentication mode --------------------------------------------
+auth_mode_label = st.sidebar.radio(
+    "Claude authentication",
+    options=[
+        "Claude.ai subscription (Claude Code)",
+        "Anthropic API key (pay-per-token)",
+    ],
+    index=0 if st.session_state.auth_mode == "subscription" else 1,
+    help=(
+        "Subscription mode routes every Claude call through the Claude "
+        "Code CLI, so usage counts against your Claude.ai plan instead "
+        "of billing an API key. Requires Claude Code installed and "
+        "`claude /login` run once.\n\nAPI-key mode hits the Anthropic "
+        "API directly and bills per token."
+    ),
+)
+st.session_state.auth_mode = (
+    "subscription" if auth_mode_label.startswith("Claude.ai") else "api"
+)
+
+if st.session_state.auth_mode == "subscription":
+    st.sidebar.info(
+        "Make sure you've run **`claude /login`** once in a terminal and "
+        "signed in with your Claude.ai (Max / Pro) account."
+    )
+
 st.session_state.jira_host = st.sidebar.text_input(
     "Jira URL",
     value=st.session_state.jira_host,
@@ -109,12 +136,17 @@ st.session_state.jira_token = st.sidebar.text_input(
     type="password",
     help="Generate at https://id.atlassian.com/manage-profile/security/api-tokens",
 )
-st.session_state.anthropic_key = st.sidebar.text_input(
-    "Anthropic API key",
-    value=st.session_state.anthropic_key,
-    type="password",
-    help="Generate at https://console.anthropic.com/settings/keys",
-)
+if st.session_state.auth_mode == "api":
+    st.session_state.anthropic_key = st.sidebar.text_input(
+        "Anthropic API key",
+        value=st.session_state.anthropic_key,
+        type="password",
+        help="Generate at https://console.anthropic.com/settings/keys",
+    )
+else:
+    st.sidebar.caption(
+        "No API key needed — Claude calls use your `claude /login` session."
+    )
 st.session_state.model = st.sidebar.text_input(
     "Claude model",
     value=st.session_state.model,
@@ -131,6 +163,7 @@ if col_b.button("Save to disk", use_container_width=True):
             "jira_token": st.session_state.jira_token,
             "anthropic_key": st.session_state.anthropic_key,
             "model": st.session_state.model,
+            "auth_mode": st.session_state.auth_mode,
         })
         st.sidebar.success(
             f"Saved to `{SECRETS_PATH}`. The file is gitignored."
@@ -144,15 +177,20 @@ os.environ["JIRA_EMAIL"] = st.session_state.jira_email or ""
 os.environ["JIRA_API_TOKEN"] = st.session_state.jira_token or ""
 os.environ["ANTHROPIC_API_KEY"] = st.session_state.anthropic_key or ""
 os.environ["CLAUDE_MODEL"] = st.session_state.model or "claude-sonnet-4-5"
+os.environ["CLAUDE_AUTH_MODE"] = st.session_state.auth_mode or "subscription"
 
 
 def _credentials_ok() -> bool:
-    return all([
+    jira_ok = all([
         st.session_state.jira_host,
         st.session_state.jira_email,
         st.session_state.jira_token,
-        st.session_state.anthropic_key,
     ])
+    if not jira_ok:
+        return False
+    if st.session_state.auth_mode == "api":
+        return bool(st.session_state.anthropic_key)
+    return True  # subscription mode needs no API key
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +215,8 @@ if not _credentials_ok():
 # clients initialise against the right values.
 # ---------------------------------------------------------------------------
 try:
-    from anthropic import Anthropic
-    from agent_cli import AgentSession, SYSTEM_PROMPT, TOOLS, run_turn
+    from agent_cli import AgentSession, run_turn
+    from llm_client import get_backend
 except Exception as e:  # pragma: no cover
     st.error(f"Failed to import agent modules: {e}")
     st.code(traceback.format_exc())
@@ -186,27 +224,37 @@ except Exception as e:  # pragma: no cover
 
 
 @st.cache_resource(show_spinner=False)
-def get_session_bundle(jira_host: str, jira_email: str, anthropic_key: str):
+def get_session_bundle(
+    auth_mode: str, jira_host: str, jira_email: str, anthropic_key: str
+):
     """Bundle of long-lived state.
 
-    Caching on (jira_host, jira_email, anthropic_key) means the session is
-    rebuilt when credentials change but reused across reruns otherwise.
+    Caching on (auth_mode, jira_host, jira_email, anthropic_key) means
+    the session is rebuilt when credentials change but reused across
+    reruns otherwise.
     """
+    # Force backend re-init so it picks up new env vars
+    get_backend(force=True)
     session = AgentSession()
-    client = Anthropic(api_key=anthropic_key)
-    return {"session": session, "client": client, "history": []}
+    return {"session": session, "history": []}
 
 
 try:
     bundle = get_session_bundle(
+        st.session_state.auth_mode,
         st.session_state.jira_host,
         st.session_state.jira_email,
         st.session_state.anthropic_key,
     )
+    backend_name = get_backend().name
 except Exception as e:
     st.error(f"Could not initialise the agent: {e}")
     st.code(traceback.format_exc())
     st.stop()
+
+st.caption(
+    f"Backend: **{backend_name}** · Model: **{st.session_state.model}**"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +329,6 @@ with tab_chat:
             with st.spinner("Thinking and fetching Jira data..."):
                 try:
                     reply = run_turn(
-                        bundle["client"],
                         bundle["session"],
                         bundle["history"],
                         prompt,

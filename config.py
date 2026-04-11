@@ -44,6 +44,12 @@ class _Config:
     def CLAUDE_MODEL(self) -> str:
         return os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
 
+    @property
+    def CLAUDE_AUTH_MODE(self) -> str:
+        """'api' (pay-per-token, needs ANTHROPIC_API_KEY) or
+        'subscription' (uses Claude Code OAuth tied to a Claude.ai plan)."""
+        return os.getenv("CLAUDE_AUTH_MODE", "api").lower()
+
     # --- Vector store ---
     @property
     def VECTOR_DB(self) -> str:

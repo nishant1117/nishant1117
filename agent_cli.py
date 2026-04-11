@@ -28,9 +28,8 @@ import sys
 import textwrap
 from typing import Any, Dict, List
 
-from anthropic import Anthropic
-
 from config import config
+from llm_client import get_backend
 from rag_agent import JiraRAGAgent
 from test_generator import TestCaseGenerator
 
@@ -361,54 +360,88 @@ def _truncate_tool_result(data: Dict[str, Any], max_chars: int = 60_000) -> str:
 
 
 def run_turn(
-    client: Anthropic,
     session: AgentSession,
     history: List[Dict[str, Any]],
     user_message: str,
+    max_iterations: int = 6,
 ) -> str:
-    """Run one user -> assistant turn, including any tool-use round-trips."""
+    """Run one user -> assistant turn, including any tool-use round-trips.
+
+    Backend-agnostic: uses `llm_client.get_backend()` so it works for
+    both the Anthropic-API flow (native tool_use) and the
+    Claude-Code-subscription flow (JSON-routed tool_use).
+    """
+    backend = get_backend()
     history.append({"role": "user", "content": user_message})
 
     final_text_parts: List[str] = []
-    # Loop until Claude stops requesting tools
-    while True:
-        response = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=history,
-        )
 
-        # Record the assistant message in history verbatim so tool_use ids
-        # line up with tool_result on the next turn.
-        history.append({"role": "assistant", "content": response.content})
+    for _ in range(max_iterations):
+        decision = backend.step(SYSTEM_PROMPT, TOOLS, history)
 
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        for block in response.content:
-            if block.type == "text" and block.text:
-                final_text_parts.append(block.text)
+        # Append whatever Claude emitted this step into history so the
+        # next iteration sees it.
+        if decision.api_assistant_content is not None:
+            # API backend: preserve the raw content blocks so tool_use
+            # ids line up with tool_result blocks we'll append later.
+            history.append(
+                {"role": "assistant", "content": decision.api_assistant_content}
+            )
+        elif decision.assistant_text or decision.tool_name:
+            history.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        decision.assistant_text
+                        or f"(requesting tool {decision.tool_name})"
+                    ),
+                }
+            )
 
-        if response.stop_reason != "tool_use" or not tool_uses:
+        if decision.assistant_text and decision.stop_reason != "tool_use":
+            final_text_parts.append(decision.assistant_text)
+
+        if decision.stop_reason != "tool_use" or not decision.tool_name:
             break
 
-        tool_results: List[Dict[str, Any]] = []
-        for tu in tool_uses:
-            print(f"\n[tool] {tu.name}({json.dumps(tu.input)})", file=sys.stderr)
-            result = session.dispatch(tu.name, tu.input)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tu.id,
-                "content": _truncate_tool_result(result),
-            })
+        # Execute the tool
+        print(
+            f"\n[tool] {decision.tool_name}({json.dumps(decision.tool_input)})",
+            file=sys.stderr,
+        )
+        result = session.dispatch(decision.tool_name, decision.tool_input)
+        result_text = _truncate_tool_result(result)
 
-        history.append({"role": "user", "content": tool_results})
+        # Append the tool result in the shape each backend expects
+        if backend.name == "api":
+            tool_use_id = getattr(decision, "_tool_use_id", None) or ""
+            history.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": result_text,
+                        }
+                    ],
+                }
+            )
+        else:
+            history.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"TOOL_RESULT for {decision.tool_name}:\n{result_text}"
+                    ),
+                }
+            )
 
-    return "\n".join(final_text_parts).strip()
+    return "\n".join(final_text_parts).strip() or "(no response)"
 
 
-def interactive(client: Anthropic, session: AgentSession) -> None:
-    print("Jira RAG Agent - interactive mode")
+def interactive(session: AgentSession) -> None:
+    print(f"Jira RAG Agent - interactive mode (backend: {get_backend().name})")
     print("Type your request (or 'exit'/'quit' to leave).")
     history: List[Dict[str, Any]] = []
     while True:
@@ -422,7 +455,7 @@ def interactive(client: Anthropic, session: AgentSession) -> None:
         if user.lower() in {"exit", "quit", ":q"}:
             return
         try:
-            reply = run_turn(client, session, history, user)
+            reply = run_turn(session, history, user)
         except Exception as e:
             logger.exception("turn failed")
             print(f"[error] {e}")
@@ -440,24 +473,32 @@ def main(argv: List[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not config.ANTHROPIC_API_KEY:
+    mode = config.CLAUDE_AUTH_MODE
+    if mode == "api" and not config.ANTHROPIC_API_KEY:
         print(
-            "ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill "
-            "in your credentials.",
+            "ANTHROPIC_API_KEY is not set. Either export it, set "
+            "CLAUDE_AUTH_MODE=subscription to use your Claude.ai plan, or "
+            "enter credentials in the Streamlit sidebar.",
             file=sys.stderr,
         )
         return 2
 
-    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    try:
+        # Validate backend up front so we fail fast with a clear error.
+        get_backend()
+    except Exception as e:
+        print(f"Backend init failed: {e}", file=sys.stderr)
+        return 2
+
     session = AgentSession()
 
     if args.prompt:
         history: List[Dict[str, Any]] = []
-        reply = run_turn(client, session, history, args.prompt)
+        reply = run_turn(session, history, args.prompt)
         print(reply)
         return 0
 
-    interactive(client, session)
+    interactive(session)
     return 0
 
 
