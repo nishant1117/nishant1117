@@ -2,8 +2,9 @@
 Configuration loader for the Jira RAG Agent.
 
 Reads credentials and tunable knobs from environment variables (with a
-.env fallback). Keep secrets out of version control — use the provided
-.env.example as a template.
+.env fallback). Env vars are read lazily on every attribute access so
+UIs (e.g. the Streamlit app) can inject credentials at runtime by
+setting os.environ before constructing the Jira / Anthropic clients.
 """
 import os
 from dotenv import load_dotenv
@@ -11,35 +12,82 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-class Config:
-    """Base configuration"""
-
-    # Jira connection
-    JIRA_HOST = os.getenv("JIRA_HOST", "https://your-domain.atlassian.net")
-    JIRA_EMAIL = os.getenv("JIRA_EMAIL")
-    JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
-
-    # Anthropic / Claude
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-    CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
-
-    # Vector DB selection
-    VECTOR_DB = os.getenv("VECTOR_DB", "chroma")
-    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-    PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
-
-    # Optional Redis cache
-    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-
-    # RAG chunking / retrieval
-    CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
-    CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-    TOP_K_RETRIEVAL = int(os.getenv("TOP_K_RETRIEVAL", "5"))
-
-    # Test case generation bounds
-    MIN_TEST_CASES_PER_TICKET = int(os.getenv("MIN_TEST_CASES_PER_TICKET", "5"))
-    MAX_TEST_CASES_PER_TICKET = int(os.getenv("MAX_TEST_CASES_PER_TICKET", "15"))
+def _int(name: str, default: str) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
 
 
-config = Config()
+class _Config:
+    """Lazy config: every attribute access re-reads os.environ."""
+
+    # --- Jira ---
+    @property
+    def JIRA_HOST(self) -> str:
+        return os.getenv("JIRA_HOST", "https://your-domain.atlassian.net")
+
+    @property
+    def JIRA_EMAIL(self) -> str:
+        return os.getenv("JIRA_EMAIL", "")
+
+    @property
+    def JIRA_API_TOKEN(self) -> str:
+        return os.getenv("JIRA_API_TOKEN", "")
+
+    # --- Anthropic ---
+    @property
+    def ANTHROPIC_API_KEY(self) -> str:
+        return os.getenv("ANTHROPIC_API_KEY", "")
+
+    @property
+    def CLAUDE_MODEL(self) -> str:
+        return os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+
+    # --- Vector store ---
+    @property
+    def VECTOR_DB(self) -> str:
+        return os.getenv("VECTOR_DB", "chroma")
+
+    @property
+    def PINECONE_API_KEY(self) -> str:
+        return os.getenv("PINECONE_API_KEY", "")
+
+    @property
+    def PINECONE_ENVIRONMENT(self) -> str:
+        return os.getenv("PINECONE_ENVIRONMENT", "")
+
+    # --- Optional Redis cache ---
+    @property
+    def REDIS_HOST(self) -> str:
+        return os.getenv("REDIS_HOST", "localhost")
+
+    @property
+    def REDIS_PORT(self) -> int:
+        return _int("REDIS_PORT", "6379")
+
+    # --- RAG tunables ---
+    @property
+    def CHUNK_SIZE(self) -> int:
+        return _int("CHUNK_SIZE", "1000")
+
+    @property
+    def CHUNK_OVERLAP(self) -> int:
+        return _int("CHUNK_OVERLAP", "200")
+
+    @property
+    def TOP_K_RETRIEVAL(self) -> int:
+        return _int("TOP_K_RETRIEVAL", "5")
+
+    # --- Test case generation bounds ---
+    @property
+    def MIN_TEST_CASES_PER_TICKET(self) -> int:
+        return _int("MIN_TEST_CASES_PER_TICKET", "5")
+
+    @property
+    def MAX_TEST_CASES_PER_TICKET(self) -> int:
+        return _int("MAX_TEST_CASES_PER_TICKET", "15")
+
+
+config = _Config()
+Config = _Config  # backwards-compatible alias

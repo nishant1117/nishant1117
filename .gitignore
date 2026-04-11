@@ -8,5 +8,7 @@ venv/
 env/
 .chromadb/
 chroma_db/
+.streamlit/secrets.toml
+.streamlit/
 *.egg-info/
 .DS_Store

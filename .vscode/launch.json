@@ -2,6 +2,21 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Streamlit UI (recommended)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "streamlit_app.py",
+                "--server.headless=false"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}"
+        },
+        {
             "name": "Agent CLI (interactive)",
             "type": "debugpy",
             "request": "launch",
@@ -59,7 +74,7 @@
             "id": "prompt",
             "type": "promptString",
             "description": "Prompt for the Jira RAG agent",
-            "default": "Analyze epic PROJ-123 and list the top regression risks"
+            "default": "Analyze epic HT-123 and list the top regression risks"
         }
     ]
 }
