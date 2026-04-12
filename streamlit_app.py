@@ -356,10 +356,17 @@ tab_chat, tab_analyze, tab_compare, tab_attach = st.tabs(
 with tab_chat:
     st.subheader("Ask the agent anything")
     st.caption(
-        "Claude will decide whether to run the analyzer or comparator "
-        "based on your prompt. Examples: "
-        "*'Analyze HT-1234 and show the critical bugs'*, "
-        "*'Compare HT-1234 and HT-1300 on regression risk'*."
+        "Claude will decide whether to run the analyzer, comparator, or "
+        "JQL search based on your prompt. Upload files alongside your "
+        "question to include them in the analysis."
+    )
+
+    chat_files = st.file_uploader(
+        "📎 Attach files to your next message (optional)",
+        accept_multiple_files=True,
+        type=None,
+        key="chat_files",
+        help="Uploaded files will be analyzed alongside the next prompt you send.",
     )
 
     if "chat_messages" not in st.session_state:
@@ -395,6 +402,45 @@ with tab_chat:
                             progress_placeholder.progress(min(progress, 1.0), text=details if details else None),
                         )
                     )
+                # If files were uploaded, do a supplementary analysis
+                # that combines the tool result with the file contents.
+                if chat_files and reply and not reply.startswith("**Error"):
+                    status_placeholder.write("📎 Analyzing uploaded files...")
+                    try:
+                        from llm_client import get_backend as _get_be3
+                        _be3 = _get_be3()
+                        chat_file_dicts = [
+                            {
+                                "name": uf.name,
+                                "media_type": uf.type or "application/octet-stream",
+                                "data": uf.getvalue(),
+                            }
+                            for uf in chat_files
+                        ]
+                        file_reply = _be3.complete_with_files(
+                            system=(
+                                "You previously answered a question about "
+                                "Jira data. The user also uploaded files. "
+                                "Analyze the files and integrate your "
+                                "findings with the previous answer. For "
+                                "images describe what you see. For data "
+                                "files analyze the content."
+                            ),
+                            text_prompt=(
+                                f"Previous answer:\n{reply[:20_000]}\n\n"
+                                f"Now analyze these {len(chat_file_dicts)} "
+                                f"uploaded file(s) and integrate:"
+                            ),
+                            files=chat_file_dicts,
+                        )
+                        reply = (
+                            reply
+                            + "\n\n---\n\n### 📎 Uploaded file analysis\n\n"
+                            + file_reply
+                        )
+                    except Exception as e:
+                        reply += f"\n\n*(File analysis failed: {e})*"
+
                 # Clear progress indicators once done
                 status_placeholder.empty()
                 progress_placeholder.empty()
@@ -485,6 +531,24 @@ with tab_analyze:
         include_attachments=include_attachments,
     )
 
+    # --- Optional file uploads to include in analysis ---
+    analyze_files = st.file_uploader(
+        "📎 Upload additional files to include in analysis (optional)",
+        accept_multiple_files=True,
+        type=None,
+        key="analyze_files",
+        help=(
+            "Upload screenshots, PDFs, Excel sheets, CSVs, specs, or "
+            "any files. They'll be analyzed together with the Jira data. "
+            "Images are read via Claude vision. Excel/CSV are fully parsed."
+        ),
+    )
+    if analyze_files:
+        st.caption(
+            f"{len(analyze_files)} file(s): "
+            + ", ".join(f.name for f in analyze_files)
+        )
+
     if st.button("Analyze", type="primary", disabled=not epic_key):
         clean_key = _extract_epic_key(epic_key)
         status_box = st.status(
@@ -545,6 +609,68 @@ with tab_analyze:
                     st.markdown("### Custom question answer")
                     _render_generic(result["custom_answer"])
 
+                # --- Integrated file analysis (if files uploaded) ---
+                if analyze_files:
+                    st.markdown("---")
+                    st.markdown("### 📎 Uploaded file analysis")
+                    file_status = st.status(
+                        "Analyzing uploaded files with Jira context...",
+                        expanded=True,
+                    )
+                    try:
+                        from llm_client import get_backend as _get_be
+                        _be = _get_be()
+                        file_dicts = [
+                            {
+                                "name": uf.name,
+                                "media_type": uf.type or "application/octet-stream",
+                                "data": uf.getvalue(),
+                            }
+                            for uf in analyze_files
+                        ]
+                        # Build a summary of the Jira analysis to give
+                        # Claude context alongside the files.
+                        summary = json.dumps(result, default=str)[:30_000]
+                        file_prompt = (
+                            f"The user analyzed Jira epic {clean_key}. "
+                            f"Here is a summary of the analysis:\n\n"
+                            f"{summary}\n\n"
+                            f"The user also uploaded {len(file_dicts)} "
+                            f"file(s) for additional context. Analyze "
+                            f"these files and integrate your findings with "
+                            f"the Jira analysis above. Identify "
+                            f"connections, gaps, issues, or insights that "
+                            f"emerge from combining the Jira data with "
+                            f"the uploaded files."
+                        )
+                        if custom_q and custom_q.strip():
+                            file_prompt += (
+                                f"\n\nAlso address the user's question: "
+                                f"{custom_q.strip()}"
+                            )
+                        file_result = _be.complete_with_files(
+                            system=(
+                                "You are an expert analyst. You have both "
+                                "Jira epic analysis results and uploaded "
+                                "files. Provide an integrated analysis "
+                                "combining insights from both sources. "
+                                "For images, describe what you see. For "
+                                "data files, analyze the data. Relate "
+                                "everything to the Jira epic context."
+                            ),
+                            text_prompt=file_prompt,
+                            files=file_dicts,
+                        )
+                        file_status.update(
+                            label="File analysis complete!", state="complete"
+                        )
+                        st.markdown(file_result)
+                    except Exception as e:
+                        file_status.update(
+                            label=f"File analysis failed: {e}", state="error"
+                        )
+                        st.code(traceback.format_exc())
+
 # --- Compare tab -----------------------------------------------------------
 with tab_compare:
     st.subheader("Compare two epics")
@@ -580,6 +706,13 @@ with tab_compare:
         include_comments=cmp_comments,
         include_changelog=cmp_changelog,
         include_attachments=cmp_attach,
+    )
+
+    compare_files = st.file_uploader(
+        "📎 Upload files for comparison context (optional)",
+        accept_multiple_files=True,
+        type=None,
+        key="compare_files",
     )
 
     if st.button(
@@ -628,6 +761,43 @@ with tab_compare:
 
                 st.markdown("### Delta analysis")
                 _render_generic(result.get("comparison", {}))
+
+                if compare_files:
+                    st.markdown("---")
+                    st.markdown("### 📎 Uploaded file analysis")
+                    try:
+                        from llm_client import get_backend as _get_be2
+                        _be2 = _get_be2()
+                        cmp_file_dicts = [
+                            {
+                                "name": uf.name,
+                                "media_type": uf.type or "application/octet-stream",
+                                "data": uf.getvalue(),
+                            }
+                            for uf in compare_files
+                        ]
+                        cmp_summary = json.dumps(result, default=str)[:30_000]
+                        cmp_file_result = _be2.complete_with_files(
+                            system=(
+                                "You are an expert analyst. You have "
+                                "comparison results for two Jira epics and "
+                                "uploaded files. Integrate the file contents "
+                                "with the comparison. For images describe "
+                                "what you see. For data files analyze the "
+                                "data. Relate everything to the comparison."
+                            ),
+                            text_prompt=(
+                                f"Comparison of {clean_key_1} vs {clean_key_2}:\n\n"
+                                f"{cmp_summary}\n\n"
+                                f"The user uploaded {len(cmp_file_dicts)} file(s). "
+                                f"Analyze them and integrate with the comparison."
+                            ),
+                            files=cmp_file_dicts,
+                        )
+                        st.markdown(cmp_file_result)
+                    except Exception as e:
+                        st.error(f"File analysis failed: {e}")
+                        st.code(traceback.format_exc())
 
 # --- Attachment Analyzer tab -----------------------------------------------
 with tab_attach:
