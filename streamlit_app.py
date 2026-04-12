@@ -486,22 +486,36 @@ with tab_analyze:
     )
 
     if st.button("Analyze", type="primary", disabled=not epic_key):
-        with st.spinner(
-            f"Processing {epic_key} — first run can take a few minutes..."
-        ):
-            try:
-                # Extract key from URL or use as-is
-                clean_key = _extract_epic_key(epic_key)
-                result = bundle["session"].run_analyzer(
-                    clean_key,
-                    focus,
-                    custom_q.strip() or None,
-                    context_options=context_options,
-                )
-            except Exception as e:
-                st.error(f"Analyzer failed: {e}")
-                st.code(traceback.format_exc())
-                result = None
+        clean_key = _extract_epic_key(epic_key)
+        status_box = st.status(
+            f"Starting analysis of {clean_key}...", expanded=True
+        )
+        progress_bar = st.progress(0.0)
+        step_log = st.empty()
+
+        def _on_progress(msg: str, pct: float) -> None:
+            progress_bar.progress(min(pct, 1.0))
+            step_log.caption(f"⏳ {msg}")
+            status_box.update(label=msg)
+
+        try:
+            result = bundle["session"].run_analyzer(
+                clean_key,
+                focus,
+                custom_q.strip() or None,
+                context_options=context_options,
+                progress=_on_progress,
+            )
+            status_box.update(
+                label=f"Analysis of {clean_key} complete!", state="complete"
+            )
+        except Exception as e:
+            status_box.update(label=f"Analysis failed: {e}", state="error")
+            st.code(traceback.format_exc())
+            result = None
+        finally:
+            progress_bar.empty()
+            step_log.empty()
 
         if result:
             if "error" in result:
@@ -571,21 +585,35 @@ with tab_compare:
     if st.button(
         "Compare", type="primary", disabled=not (epic_1 and epic_2)
     ):
-        with st.spinner(f"Comparing {epic_1} vs {epic_2}..."):
-            try:
-                # Extract keys from URLs or use as-is
-                clean_key_1 = _extract_epic_key(epic_1)
-                clean_key_2 = _extract_epic_key(epic_2)
-                result = bundle["session"].run_comparator(
-                    clean_key_1,
-                    clean_key_2,
-                    goal.strip() or None,
-                    context_options=compare_context,
-                )
-            except Exception as e:
-                st.error(f"Comparator failed: {e}")
-                st.code(traceback.format_exc())
-                result = None
+        clean_key_1 = _extract_epic_key(epic_1)
+        clean_key_2 = _extract_epic_key(epic_2)
+        cmp_status = st.status(
+            f"Comparing {clean_key_1} vs {clean_key_2}...", expanded=True
+        )
+        cmp_bar = st.progress(0.0)
+        cmp_log = st.empty()
+
+        def _on_cmp(msg: str, pct: float) -> None:
+            cmp_bar.progress(min(pct, 1.0))
+            cmp_log.caption(f"⏳ {msg}")
+            cmp_status.update(label=msg)
+
+        try:
+            result = bundle["session"].run_comparator(
+                clean_key_1,
+                clean_key_2,
+                goal.strip() or None,
+                context_options=compare_context,
+                progress=_on_cmp,
+            )
+            cmp_status.update(label="Comparison complete!", state="complete")
+        except Exception as e:
+            cmp_status.update(label=f"Comparison failed: {e}", state="error")
+            st.code(traceback.format_exc())
+            result = None
+        finally:
+            cmp_bar.empty()
+            cmp_log.empty()
 
         if result:
             if "error" in result:

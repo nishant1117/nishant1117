@@ -30,7 +30,7 @@ from typing import Any, Dict, List
 
 from config import config
 from llm_client import get_backend
-from rag_agent import ContextOptions, DEFAULT_CONTEXT_OPTIONS, JiraRAGAgent
+from rag_agent import ContextOptions, DEFAULT_CONTEXT_OPTIONS, JiraRAGAgent, ProgressFn
 from test_generator import TestCaseGenerator
 
 logging.basicConfig(
@@ -280,12 +280,13 @@ class AgentSession:
         self,
         epic_key: str,
         context_options: ContextOptions | None = None,
+        progress: ProgressFn = None,
     ) -> Dict[str, Any]:
         opts = context_options or DEFAULT_CONTEXT_OPTIONS
         key = (epic_key, opts.cache_key())
         if key not in self._cache:
             self._cache[key] = self.agent.process_epic(
-                epic_key, context_options=opts
+                epic_key, context_options=opts, progress=progress,
             )
         return self._cache[key]
 
@@ -296,8 +297,9 @@ class AgentSession:
         focus: str,
         custom_question: str | None = None,
         context_options: ContextOptions | None = None,
+        progress: ProgressFn = None,
     ) -> Dict[str, Any]:
-        results = self.ensure_processed(epic_key, context_options)
+        results = self.ensure_processed(epic_key, context_options, progress=progress)
         if "error" in results:
             return {"error": results["error"], "epic_key": epic_key}
 
@@ -397,9 +399,10 @@ class AgentSession:
         epic_key_2: str,
         comparison_goal: str | None = None,
         context_options: ContextOptions | None = None,
+        progress: ProgressFn = None,
     ) -> Dict[str, Any]:
-        r1 = self.ensure_processed(epic_key_1, context_options)
-        r2 = self.ensure_processed(epic_key_2, context_options)
+        r1 = self.ensure_processed(epic_key_1, context_options, progress=progress)
+        r2 = self.ensure_processed(epic_key_2, context_options, progress=progress)
         if "error" in r1 or "error" in r2:
             return {
                 "error": "Failed to load one of the epics",

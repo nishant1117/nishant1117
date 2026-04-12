@@ -11,7 +11,7 @@ Given an epic key, the agent:
 """
 import logging
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Callable, List, Dict, Any, Optional, Tuple
 
 from jira_client import JiraClient
 from vector_store import VectorStore
@@ -51,6 +51,9 @@ class ContextOptions:
 
 
 DEFAULT_CONTEXT_OPTIONS = ContextOptions()
+
+# progress_callback(message: str, fraction: float 0-1)
+ProgressFn = Optional[Callable[[str, float], None]]
 
 
 class JiraRAGAgent:
@@ -110,6 +113,7 @@ class JiraRAGAgent:
         self,
         epic_key: str,
         context_options: Optional[ContextOptions] = None,
+        progress: ProgressFn = None,
     ) -> Dict[str, Any]:
         """Main method to process an epic and generate analysis and test cases.
 
@@ -118,13 +122,22 @@ class JiraRAGAgent:
             context_options: Which extra context sections to include
                 when prompting Claude per ticket. Defaults to
                 DEFAULT_CONTEXT_OPTIONS (everything except attachments).
+            progress: Optional callback ``(message, fraction)`` called
+                at each major step so the UI can show live updates.
         """
         opts = context_options or DEFAULT_CONTEXT_OPTIONS
+        _p = progress or (lambda m, f: None)
+
         try:
+            _p(f"Fetching Jira data for {epic_key}...", 0.05)
             data = self.fetch_epic_data(epic_key)
             epic_details = data["epic_details"]
             tickets = data["tickets"]
 
+            _p(
+                f"Found {len(tickets)} tickets. Indexing into vector store...",
+                0.10,
+            )
             documents = self._prepare_documents(epic_details, tickets)
             self.vector_store.clear_collection()
             self.vector_store.add_documents(documents)
@@ -136,16 +149,32 @@ class JiraRAGAgent:
                 "tickets": {},
             }
 
-            for ticket in tickets:
-                logger.info(f"Processing ticket: {ticket.get('key', '')}")
+            total = len(tickets)
+            for i, ticket in enumerate(tickets):
+                tk = ticket.get("key", "")
+                base_pct = 0.12 + (0.86 * i / max(total, 1))
+                step_pct = 0.86 / max(total, 1)
+
+                _p(
+                    f"Ticket {i + 1}/{total}: {tk} — preparing context...",
+                    base_pct,
+                )
+                logger.info(f"Processing ticket: {tk}")
+
                 filtered = self._filter_ticket(ticket, opts)
-                # Inject parent epic description so Claude always knows
-                # the broader context this ticket lives in.
                 filtered["parent_epic_description"] = epic_details.get(
                     "description", ""
                 )
-                results["tickets"][ticket["key"]] = self._process_ticket(filtered)
 
+                results["tickets"][tk] = self._process_ticket(
+                    filtered,
+                    progress=progress,
+                    base_pct=base_pct,
+                    step_pct=step_pct,
+                    ticket_label=f"Ticket {i + 1}/{total} ({tk})",
+                )
+
+            _p(f"Done — processed {total} tickets for {epic_key}.", 1.0)
             logger.info(f"Completed processing epic {epic_key}")
             return results
         except Exception as e:
@@ -277,7 +306,14 @@ class JiraRAGAgent:
 
         return documents
 
-    def _process_ticket(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_ticket(
+        self,
+        ticket: Dict[str, Any],
+        progress: ProgressFn = None,
+        base_pct: float = 0.0,
+        step_pct: float = 0.0,
+        ticket_label: str = "",
+    ) -> Dict[str, Any]:
         """Process individual ticket with analysis and test cases.
 
         `ticket` is the already-filtered dict from `_filter_ticket`, so
@@ -287,7 +323,19 @@ class JiraRAGAgent:
         fetched once in `fetch_epic_data`) and pass the full filtered
         ticket into the test generator so its prompts can cite
         subtasks, linked issues, and attachments when enabled.
+
+        Progress is reported for each of the five LLM calls so the UI
+        can show granular updates.
         """
+        _p = progress or (lambda m, f: None)
+        sub_steps = [
+            ("test cases", 0.0),
+            ("edge cases", 0.2),
+            ("regression analysis", 0.4),
+            ("detailed analysis", 0.6),
+            ("bug detection", 0.8),
+        ]
+
         try:
             comments = ticket.get("comments", []) or []
             changelog = ticket.get("changelog", []) or []
@@ -295,30 +343,51 @@ class JiraRAGAgent:
             query = f"{ticket.get('summary', '')} {ticket.get('description', '')}"
             context = self.vector_store.search(query)
 
+            def _sub(label: str, frac: float) -> None:
+                _p(
+                    f"{ticket_label} — generating {label}...",
+                    base_pct + step_pct * frac,
+                )
+
+            _sub(*sub_steps[0])
+            test_cases = self.test_generator.generate_test_cases(
+                ticket, context
+            )
+
+            _sub(*sub_steps[1])
+            edge_cases = self.test_generator.generate_edge_cases(
+                ticket, context
+            )
+
+            _sub(*sub_steps[2])
+            regression = self.test_generator.generate_regression_analysis(
+                ticket, changelog, context
+            )
+
+            _sub(*sub_steps[3])
+            analysis = self.test_generator.generate_detailed_analysis(
+                ticket, comments, changelog, context
+            )
+
+            _sub(*sub_steps[4])
+            bug_analysis = self.test_generator.generate_bug_detection_analysis(
+                ticket, comments, changelog, context
+            )
+
             return {
                 "ticket": ticket,
                 "comments": comments,
                 "changelog": changelog,
-                "test_cases": self.test_generator.generate_test_cases(
-                    ticket, context
-                ),
-                "edge_cases": self.test_generator.generate_edge_cases(
-                    ticket, context
-                ),
-                "regression_analysis":
-                    self.test_generator.generate_regression_analysis(
-                        ticket, changelog, context
-                    ),
-                "analysis": self.test_generator.generate_detailed_analysis(
-                    ticket, comments, changelog, context
-                ),
-                "bug_analysis":
-                    self.test_generator.generate_bug_detection_analysis(
-                        ticket, comments, changelog, context
-                    ),
+                "test_cases": test_cases,
+                "edge_cases": edge_cases,
+                "regression_analysis": regression,
+                "analysis": analysis,
+                "bug_analysis": bug_analysis,
             }
         except Exception as e:
-            logger.error(f"Failed to process ticket {ticket.get('key', '')}: {str(e)}")
+            logger.error(
+                f"Failed to process ticket {ticket.get('key', '')}: {str(e)}"
+            )
             return {"ticket": ticket, "error": str(e)}
 
     # ------------------------------------------------------------------
