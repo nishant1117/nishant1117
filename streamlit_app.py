@@ -20,11 +20,38 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
 import streamlit as st
+
+
+def _extract_epic_key(input_str: str) -> str:
+    """Extract epic key from various formats.
+    
+    Handles:
+    - Just the key: "PROD-3300"
+    - Jira URL: "https://healthtap.atlassian.net/browse/PROD-3300"
+    - URL with query params
+    """
+    if not input_str:
+        return ""
+    
+    input_str = input_str.strip()
+    
+    # Try to extract from URL (look for /browse/KEY pattern)
+    match = re.search(r'/browse/([A-Z]+-\d+)', input_str)
+    if match:
+        return match.group(1)
+    
+    # If it's just a key like "PROD-3300", return as-is
+    if re.match(r'^[A-Z]+-\d+$', input_str):
+        return input_str
+    
+    # Otherwise return the cleaned input (might be malformed, but let Jira error handle it)
+    return input_str
 
 # ---------------------------------------------------------------------------
 # Page config (must be first Streamlit call)
@@ -43,52 +70,42 @@ SECRETS_PATH = Path(".streamlit") / "secrets.toml"
 # ---------------------------------------------------------------------------
 def _load_saved_secrets() -> Dict[str, str]:
     defaults = {
-        "jira_host": "https://healthtap.atlassian.net",
-        "jira_email": "",
-        "jira_token": "",
-        "anthropic_key": "",
-        "model": "claude-sonnet-4-5",
-        "auth_mode": "subscription",
+        "jira_host": os.getenv("JIRA_HOST", "https://healthtap.atlassian.net"),
+        "jira_email": os.getenv("JIRA_EMAIL", ""),
+        "jira_token": os.getenv("JIRA_API_TOKEN", ""),
+        "claude_oauth_token": os.getenv("CLAUDE_CODE_OAUTH_TOKEN", ""),
+        "model": os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5"),
     }
     try:
         # st.secrets is dict-like; reading a missing key raises.
         sec = st.secrets
         for k in defaults:
             if k in sec:
-                val = str(sec[k])
-                # Normalise auth_mode — only "api" or "subscription"
-                # are legal. Anything else (missing / typo / old
-                # secrets file) falls back to "subscription".
-                if k == "auth_mode" and val not in ("api", "subscription"):
-                    val = "subscription"
-                defaults[k] = val
+                defaults[k] = str(sec[k])
     except Exception:
         pass
     return defaults
 
 
-def _save_secrets_to_disk(values: Dict[str, str]) -> None:
+def _save_secrets_to_disk(values: Dict[str, Any]) -> None:
     SECRETS_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Saved locally by the Streamlit UI. Gitignored — never commit.",
     ]
     for k, v in values.items():
-        escaped = v.replace('"', '\\"')
-        lines.append(f'{k} = "{escaped}"')
+        if v:  # Only save non-empty values
+            escaped = str(v).replace('"', '\\"')
+            lines.append(f'{k} = "{escaped}"')
     SECRETS_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _init_session_state() -> None:
-    """Initialise credential keys in st.session_state.
-
-    Idempotent: safe to call on every rerun. Any key missing from a
-    stale session (e.g. after a code update that adds a new key) is
-    populated with the default from _load_saved_secrets().
-    """
+    if "_creds_loaded" in st.session_state:
+        return
     defaults = _load_saved_secrets()
     for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+        st.session_state.setdefault(k, v)
+    st.session_state._creds_loaded = True
 
 
 def _claude_agent_sdk_available() -> bool:
@@ -138,33 +155,6 @@ st.sidebar.markdown(
     "your computer)."
 )
 
-# --- Claude authentication mode --------------------------------------------
-st.sidebar.radio(
-    "Claude authentication",
-    options=[_LABEL_SUB, _LABEL_API],
-    key=_RADIO_KEY,  # widget value is the single source of truth
-    help=(
-        "Subscription mode routes every Claude call through the Claude "
-        "Code CLI, so usage counts against your Claude.ai plan instead "
-        "of billing an API key. Requires Claude Code installed and "
-        "`claude /login` run once.\n\nAPI-key mode hits the Anthropic "
-        "API directly and bills per token."
-    ),
-)
-# Derive auth_mode straight from the widget value so there's no way
-# for the two to disagree.
-st.session_state.auth_mode = (
-    "subscription"
-    if st.session_state[_RADIO_KEY].startswith("Claude.ai")
-    else "api"
-)
-
-if st.session_state.auth_mode == "subscription":
-    st.sidebar.info(
-        "Make sure you've run **`claude /login`** once in a terminal and "
-        "signed in with your Claude.ai (Max / Pro) account."
-    )
-
 st.session_state.jira_host = st.sidebar.text_input(
     "Jira URL",
     value=st.session_state.jira_host,
@@ -180,24 +170,12 @@ st.session_state.jira_token = st.sidebar.text_input(
     type="password",
     help="Generate at https://id.atlassian.com/manage-profile/security/api-tokens",
 )
-
-# API key field is rendered ONLY in api mode. In subscription mode we
-# actively clear any leftover anthropic_key from session state so it
-# can't accidentally leak into the environment.
-if st.session_state.auth_mode == "api":
-    st.session_state.anthropic_key = st.sidebar.text_input(
-        "Anthropic API key",
-        value=st.session_state.anthropic_key,
-        type="password",
-        help="Generate at https://console.anthropic.com/settings/keys",
-    )
-else:
-    st.sidebar.success(
-        "✅ Subscription mode — no API key required. Calls use your "
-        "`claude /login` session."
-    )
-    st.session_state.anthropic_key = ""
-
+st.session_state.claude_oauth_token = st.sidebar.text_input(
+    "Claude OAuth Token",
+    value=st.session_state.claude_oauth_token,
+    type="password",
+    help="Run 'claude setup-token' to generate a long-lived token",
+)
 st.session_state.model = st.sidebar.text_input(
     "Claude model",
     value=st.session_state.model,
@@ -212,9 +190,8 @@ if col_b.button("Save to disk", use_container_width=True):
             "jira_host": st.session_state.jira_host,
             "jira_email": st.session_state.jira_email,
             "jira_token": st.session_state.jira_token,
-            "anthropic_key": st.session_state.anthropic_key,
+            "claude_oauth_token": st.session_state.claude_oauth_token,
             "model": st.session_state.model,
-            "auth_mode": st.session_state.auth_mode,
         })
         st.sidebar.success(
             f"Saved to `{SECRETS_PATH}`. The file is gitignored."
@@ -226,22 +203,17 @@ if col_b.button("Save to disk", use_container_width=True):
 os.environ["JIRA_HOST"] = st.session_state.jira_host or ""
 os.environ["JIRA_EMAIL"] = st.session_state.jira_email or ""
 os.environ["JIRA_API_TOKEN"] = st.session_state.jira_token or ""
-os.environ["ANTHROPIC_API_KEY"] = st.session_state.anthropic_key or ""
+os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = st.session_state.claude_oauth_token or ""
 os.environ["CLAUDE_MODEL"] = st.session_state.model or "claude-sonnet-4-5"
-os.environ["CLAUDE_AUTH_MODE"] = st.session_state.auth_mode or "subscription"
 
 
 def _credentials_ok() -> bool:
-    jira_ok = all([
+    return all([
         st.session_state.jira_host,
         st.session_state.jira_email,
         st.session_state.jira_token,
+        st.session_state.claude_oauth_token,
     ])
-    if not jira_ok:
-        return False
-    if st.session_state.auth_mode == "api":
-        return bool(st.session_state.anthropic_key)
-    return True  # subscription mode needs no API key
 
 
 # ---------------------------------------------------------------------------
@@ -288,23 +260,9 @@ st.caption(
 )
 
 if not _credentials_ok():
-    missing = []
-    if not st.session_state.jira_host:
-        missing.append("Jira URL")
-    if not st.session_state.jira_email:
-        missing.append("Jira email")
-    if not st.session_state.jira_token:
-        missing.append("Jira API token")
-    if (
-        st.session_state.auth_mode == "api"
-        and not st.session_state.anthropic_key
-    ):
-        missing.append("Anthropic API key")
     st.info(
-        "Missing credentials: **"
-        + ", ".join(missing)
-        + "**. Fill them in the left sidebar and click **Use for session** "
-        "or **Save to disk**."
+        "Fill in the credentials in the left sidebar and click **Use for "
+        "session** or **Save to disk**. Then come back here."
     )
     st.stop()
 
@@ -324,37 +282,27 @@ except Exception as e:  # pragma: no cover
 
 
 @st.cache_resource(show_spinner=False)
-def get_session_bundle(
-    auth_mode: str, jira_host: str, jira_email: str, anthropic_key: str
-):
+def get_session_bundle(jira_host: str, jira_email: str, claude_oauth_token: str):
     """Bundle of long-lived state.
 
-    Caching on (auth_mode, jira_host, jira_email, anthropic_key) means
+    Caching on (jira_host, jira_email, claude_oauth_token) means
     the session is rebuilt when credentials change but reused across
     reruns otherwise.
     """
-    # Force backend re-init so it picks up new env vars
-    get_backend(force=True)
     session = AgentSession()
     return {"session": session, "history": []}
 
 
 try:
     bundle = get_session_bundle(
-        st.session_state.get("auth_mode", "subscription"),
         st.session_state.get("jira_host", ""),
         st.session_state.get("jira_email", ""),
-        st.session_state.get("anthropic_key", ""),
+        st.session_state.get("claude_oauth_token", ""),
     )
-    backend_name = get_backend().name
 except Exception as e:
     st.error(f"Could not initialise the agent: {e}")
     st.code(traceback.format_exc())
     st.stop()
-
-st.caption(
-    f"Backend: **{backend_name}** · Model: **{st.session_state.model}**"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -426,16 +374,35 @@ with tab_chat:
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
-            with st.spinner("Thinking and fetching Jira data..."):
-                try:
+            # Create placeholder and progress tracking
+            status_placeholder = st.empty()
+            progress_placeholder = st.empty()
+            response_placeholder = st.empty()
+            
+            try:
+                # Create a progress tracker callback
+                progress_state = {"status": "", "progress": 0.0, "details": ""}
+                
+                # Use container for real-time updates
+                with st.container():
                     reply = run_turn(
                         bundle["session"],
                         bundle["history"],
                         prompt,
+                        progress_callback=lambda status, progress, details: (
+                            progress_state.update({"status": status, "progress": progress, "details": details}),
+                            status_placeholder.write(f"📊 {status}"),
+                            progress_placeholder.progress(min(progress, 1.0), text=details if details else None),
+                        )
                     )
-                except Exception as e:
-                    reply = f"**Error:** {e}\n\n```\n{traceback.format_exc()}\n```"
-            st.markdown(reply)
+                # Clear progress indicators once done
+                status_placeholder.empty()
+                progress_placeholder.empty()
+            except Exception as e:
+                reply = f"**Error:** {e}\n\n```\n{traceback.format_exc()}\n```"
+                status_placeholder.empty()
+                progress_placeholder.empty()
+            response_placeholder.markdown(reply)
         st.session_state.chat_messages.append({"role": "assistant", "content": reply})
 
     if st.button("Clear chat"):
@@ -523,8 +490,10 @@ with tab_analyze:
             f"Processing {epic_key} — first run can take a few minutes..."
         ):
             try:
+                # Extract key from URL or use as-is
+                clean_key = _extract_epic_key(epic_key)
                 result = bundle["session"].run_analyzer(
-                    epic_key.strip(),
+                    clean_key,
                     focus,
                     custom_q.strip() or None,
                     context_options=context_options,
@@ -604,9 +573,12 @@ with tab_compare:
     ):
         with st.spinner(f"Comparing {epic_1} vs {epic_2}..."):
             try:
+                # Extract keys from URLs or use as-is
+                clean_key_1 = _extract_epic_key(epic_1)
+                clean_key_2 = _extract_epic_key(epic_2)
                 result = bundle["session"].run_comparator(
-                    epic_1.strip(),
-                    epic_2.strip(),
+                    clean_key_1,
+                    clean_key_2,
                     goal.strip() or None,
                     context_options=compare_context,
                 )
@@ -619,11 +591,11 @@ with tab_compare:
             if "error" in result:
                 st.error(result["error"])
             else:
-                st.success(f"Compared {epic_1} vs {epic_2}.")
+                st.success(f"Compared {clean_key_1} vs {clean_key_2}.")
                 col_l, col_r = st.columns(2)
-                col_l.markdown(f"### {epic_1}")
+                col_l.markdown(f"### {clean_key_1}")
                 col_l.json(result.get("epic_1_summary", {}))
-                col_r.markdown(f"### {epic_2}")
+                col_r.markdown(f"### {clean_key_2}")
                 col_r.json(result.get("epic_2_summary", {}))
 
                 st.markdown("### Delta analysis")

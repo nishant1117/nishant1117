@@ -427,29 +427,72 @@ def run_turn(
     history: List[Dict[str, Any]],
     user_message: str,
     max_iterations: int = 6,
+    progress_callback=None,
 ) -> str:
     """Run one user -> assistant turn, including any tool-use round-trips.
 
     Backend-agnostic: uses `llm_client.get_backend()` so it works for
     both the Anthropic-API flow (native tool_use) and the
     Claude-Code-subscription flow (JSON-routed tool_use).
+    
+    Args:
+        session: The AgentSession object.
+        history: Message history list.
+        user_message: User's input message.
+        max_iterations: Max number of agent iterations.
+        progress_callback: Optional callback function(status, progress, details) for progress updates.
     """
     backend = get_backend()
+    
+    def _update_progress(status: str, progress: float, details: str = "") -> None:
+        """Update progress via callback and log."""
+        if progress_callback:
+            try:
+                progress_callback(status, progress, details)
+            except Exception as e:
+                logger.warning(f"Progress callback error: {e}")
+        logger.info(f"[PROGRESS] {status} | {progress*100:.0f}% | {details}")
+    
+    logger.info(f"Starting run_turn with user message: {user_message[:100]}")
     history.append({"role": "user", "content": user_message})
 
     final_text_parts: List[str] = []
+    iteration_progress_step = 1.0 / (max_iterations + 2)  # +2 for thinking and finalizing
 
-    for _ in range(max_iterations):
+    for iteration in range(max_iterations):
+        logger.info(f"--- Iteration {iteration + 1}/{max_iterations} ---")
+        _update_progress(
+            "Thinking",
+            (iteration * iteration_progress_step),
+            f"Iteration {iteration + 1}/{max_iterations}"
+        )
         decision = backend.step(SYSTEM_PROMPT, TOOLS, history)
+        logger.info(f"Backend returned: stop_reason={decision.stop_reason}, tool_name={decision.tool_name}, text_len={len(decision.assistant_text) if decision.assistant_text else 0}")
 
         # Append whatever Claude emitted this step into history so the
         # next iteration sees it.
         if decision.api_assistant_content is not None:
             # API backend: preserve the raw content blocks so tool_use
             # ids line up with tool_result blocks we'll append later.
-            history.append(
-                {"role": "assistant", "content": decision.api_assistant_content}
-            )
+            # Convert content blocks (Pydantic models) to dicts for serialization
+            content = []
+            for block in decision.api_assistant_content:
+                if hasattr(block, 'model_dump'):
+                    # Pydantic v2 model
+                    content.append(block.model_dump(exclude_none=True))
+                elif hasattr(block, 'dict'):
+                    # Pydantic v1 model
+                    content.append(block.dict(exclude_none=True))
+                elif isinstance(block, dict):
+                    content.append(block)
+                else:
+                    # Last resort: convert object attributes to dict
+                    block_dict = {}
+                    for k, v in block.__dict__.items():
+                        if not k.startswith('_') and v is not None:
+                            block_dict[k] = v
+                    content.append(block_dict)
+            history.append({"role": "assistant", "content": content})
         elif decision.assistant_text or decision.tool_name:
             history.append(
                 {
@@ -465,6 +508,11 @@ def run_turn(
             final_text_parts.append(decision.assistant_text)
 
         if decision.stop_reason != "tool_use" or not decision.tool_name:
+            _update_progress(
+                "Finalizing response",
+                (max_iterations) * iteration_progress_step,
+                "Generating final answer..."
+            )
             break
 
         # Execute the tool
@@ -472,12 +520,47 @@ def run_turn(
             f"\n[tool] {decision.tool_name}({json.dumps(decision.tool_input)})",
             file=sys.stderr,
         )
+        logger.info(f"Executing tool: {decision.tool_name}")
+        _update_progress(
+            f"Running {decision.tool_name}",
+            (iteration + 0.3) * iteration_progress_step,
+            f"Fetching and analyzing Jira data..."
+        )
         result = session.dispatch(decision.tool_name, decision.tool_input)
+        logger.info(f"Tool {decision.tool_name} completed. Result type: {type(result)}, length: {len(str(result)) if result else 0}")
+        _update_progress(
+            f"Processing {decision.tool_name} results",
+            (iteration + 0.6) * iteration_progress_step,
+            f"Analyzing {len(str(result)) if result else 0} chars of output..."
+        )
         result_text = _truncate_tool_result(result)
+        logger.info(f"Tool result truncated to {len(result_text)} chars")
 
         # Append the tool result in the shape each backend expects
         if backend.name == "api":
-            tool_use_id = getattr(decision, "_tool_use_id", None) or ""
+            tool_use_id = getattr(decision, "_tool_use_id", None)
+            if not tool_use_id:
+                # If tool_use_id is missing, try to extract from the last assistant message
+                logger.warning(f"tool_use_id was empty, trying to extract from history")
+                if history and history[-1].get("role") == "assistant":
+                    last_msg = history[-1]
+                    if isinstance(last_msg.get("content"), list):
+                        for block in last_msg["content"]:
+                            if block.get("type") == "tool_use":
+                                tool_use_id = block.get("id")
+                                if tool_use_id:
+                                    break
+            
+            if not tool_use_id:
+                logger.error(f"Could not find tool_use_id for tool result. History: {history[-1]}")
+                raise ValueError(f"tool_use_id not found for tool {decision.tool_name}")
+            
+            logger.info(f"Appending tool_result with tool_use_id={tool_use_id}, result_length={len(result_text)}")
+            _update_progress(
+                f"Sending {decision.tool_name} results to Claude",
+                (iteration + 0.9) * iteration_progress_step,
+                f"Awaiting next decision..."
+            )
             history.append(
                 {
                     "role": "user",
@@ -500,6 +583,8 @@ def run_turn(
                 }
             )
 
+    _update_progress("Done", 1.0, "Response complete")
+    logger.info(f"run_turn complete. Final response length: {len(''.join(final_text_parts))} chars")
     return "\n".join(final_text_parts).strip() or "(no response)"
 
 
