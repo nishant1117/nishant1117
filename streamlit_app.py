@@ -74,7 +74,7 @@ def _load_saved_secrets() -> Dict[str, str]:
         "jira_email": os.getenv("JIRA_EMAIL", ""),
         "jira_token": os.getenv("JIRA_API_TOKEN", ""),
         "claude_oauth_token": os.getenv("CLAUDE_CODE_OAUTH_TOKEN", ""),
-        "model": os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5"),
+        "model": os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
     }
     try:
         # st.secrets is dict-like; reading a missing key raises.
@@ -204,7 +204,7 @@ os.environ["JIRA_HOST"] = st.session_state.jira_host or ""
 os.environ["JIRA_EMAIL"] = st.session_state.jira_email or ""
 os.environ["JIRA_API_TOKEN"] = st.session_state.jira_token or ""
 os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = st.session_state.claude_oauth_token or ""
-os.environ["CLAUDE_MODEL"] = st.session_state.model or "claude-sonnet-4-5"
+os.environ["CLAUDE_MODEL"] = st.session_state.model or "claude-sonnet-4-6"
 
 
 def _credentials_ok() -> bool:

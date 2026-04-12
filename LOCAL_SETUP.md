@@ -31,7 +31,7 @@ JIRA_HOST=https://your-domain.atlassian.net
 JIRA_EMAIL=you@example.com
 JIRA_API_TOKEN=...              # from Atlassian
 ANTHROPIC_API_KEY=sk-ant-...    # from console.anthropic.com
-CLAUDE_MODEL=claude-sonnet-4-5
+CLAUDE_MODEL=claude-sonnet-4-6
 ```
 
 > `.env` is gitignored — never commit it.

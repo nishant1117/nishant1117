@@ -113,7 +113,7 @@ In the left sidebar:
 2. **Jira URL:** `https://healthtap.atlassian.net`
 3. **Jira email:** `nishant.mahajan@healthtap.com`
 4. **Jira API token:** your freshly-rotated Atlassian token.
-5. **Claude model:** leave as `claude-sonnet-4-5`.
+5. **Claude model:** leave as `claude-sonnet-4-6`.
 
 No Anthropic key is shown when subscription mode is selected — it uses
 your `claude /login` session automatically.

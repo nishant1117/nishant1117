@@ -80,7 +80,7 @@ In the left sidebar of the app:
 | **Jira URL** | `https://healthtap.atlassian.net` |
 | **Jira email** | `nishant.mahajan@healthtap.com` |
 | **Jira API token** | your token from <https://id.atlassian.com/manage-profile/security/api-tokens> |
-| **Claude model** | leave as `claude-sonnet-4-5` |
+| **Claude model** | leave as `claude-sonnet-4-6` |
 
 Click **Save to disk**. The credentials are saved to a local file
 (`.streamlit/secrets.toml`) that is gitignored — it never leaves your

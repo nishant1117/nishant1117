@@ -42,7 +42,7 @@ class _Config:
 
     @property
     def CLAUDE_MODEL(self) -> str:
-        return os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+        return os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 
     @property
     def CLAUDE_AUTH_MODE(self) -> str:
