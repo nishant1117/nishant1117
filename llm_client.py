@@ -32,6 +32,7 @@ The backend is selected via the env var `CLAUDE_AUTH_MODE`:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -69,6 +70,55 @@ class LLMBackend(ABC):
     @abstractmethod
     def complete(self, system: str, user: str) -> str:
         """Single-turn prompt -> text."""
+
+    def complete_with_files(
+        self,
+        system: str,
+        text_prompt: str,
+        files: List[Dict[str, Any]],
+    ) -> str:
+        """Multimodal prompt: text + images/PDFs/text files.
+
+        `files` is a list of dicts with keys:
+          - name: str (filename)
+          - media_type: str (e.g. "image/png", "application/pdf", "text/plain")
+          - data: bytes (raw file content)
+
+        Images are sent as vision content blocks so Claude can see
+        screenshots, diagrams, mockups, etc. Text/PDF are inlined as
+        text blocks. Other binary formats are listed by filename only.
+
+        Default implementation falls back to text-only (extracts
+        whatever text it can and ignores images). Backends with vision
+        support override this.
+        """
+        # Fallback: extract text from files and concatenate with prompt.
+        parts = [text_prompt]
+        for f in files:
+            mt = f.get("media_type", "")
+            name = f.get("name", "file")
+            raw = f.get("data", b"")
+            if mt.startswith("text/") or mt in (
+                "application/json", "application/xml", "application/csv",
+            ):
+                parts.append(
+                    f"\n--- {name} ---\n"
+                    + raw.decode("utf-8", errors="replace")[:200_000]
+                )
+            elif mt == "application/pdf":
+                text = ""
+                try:
+                    from jira_client import _extract_pdf_text
+                    text = _extract_pdf_text(raw)
+                except Exception:
+                    pass
+                if text:
+                    parts.append(f"\n--- {name} (PDF extracted text) ---\n{text}")
+                else:
+                    parts.append(f"\n[Attached PDF: {name}, {len(raw)} bytes — no text extracted]")
+            else:
+                parts.append(f"\n[Attached file: {name}, {mt}, {len(raw)} bytes]")
+        return self.complete(system, "\n".join(parts))
 
     @abstractmethod
     def step(
@@ -121,6 +171,85 @@ class ApiKeyBackend(LLMBackend):
         for block in resp.content:
             if getattr(block, "type", None) == "text" and getattr(block, "text", None):
                 out.append(block.text)
+        return "\n".join(out).strip()
+
+    def complete_with_files(
+        self,
+        system: str,
+        text_prompt: str,
+        files: List[Dict[str, Any]],
+    ) -> str:
+        """Multimodal: sends images as vision blocks so Claude can
+        actually *see* screenshots, diagrams, mockups, etc."""
+        content: List[Dict[str, Any]] = []
+
+        # Add text prompt first.
+        content.append({"type": "text", "text": text_prompt})
+
+        # Process each file.
+        for f in files:
+            mt = f.get("media_type", "") or ""
+            name = f.get("name", "file")
+            raw: bytes = f.get("data", b"")
+            if not raw:
+                continue
+
+            if mt.startswith("image/"):
+                # Vision: encode as base64 image block.
+                b64 = base64.standard_b64encode(raw).decode("ascii")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mt,
+                        "data": b64,
+                    },
+                })
+                content.append({
+                    "type": "text",
+                    "text": f"[Above image: {name}]",
+                })
+            elif mt == "application/pdf":
+                text = ""
+                try:
+                    from jira_client import _extract_pdf_text
+                    text = _extract_pdf_text(raw)
+                except Exception:
+                    pass
+                if text:
+                    content.append({
+                        "type": "text",
+                        "text": f"--- {name} (PDF) ---\n{text}\n--- end ---",
+                    })
+                else:
+                    content.append({
+                        "type": "text",
+                        "text": f"[PDF: {name}, {len(raw)} bytes, no text extracted]",
+                    })
+            elif mt.startswith("text/") or mt in (
+                "application/json", "application/xml",
+            ):
+                decoded = raw.decode("utf-8", errors="replace")[:200_000]
+                content.append({
+                    "type": "text",
+                    "text": f"--- {name} ---\n{decoded}\n--- end ---",
+                })
+            else:
+                content.append({
+                    "type": "text",
+                    "text": f"[Binary file: {name}, {mt}, {len(raw)} bytes]",
+                })
+
+        resp = self._client.messages.create(
+            model=self._model,
+            max_tokens=8192,
+            system=system,
+            messages=[{"role": "user", "content": content}],
+        )
+        out: List[str] = []
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                out.append(getattr(block, "text", ""))
         return "\n".join(out).strip()
 
     def _call_with_tools(

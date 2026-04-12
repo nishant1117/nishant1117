@@ -348,8 +348,8 @@ def _render_generic(data: Any) -> None:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_chat, tab_analyze, tab_compare = st.tabs(
-    ["💬 Chat", "🔍 Analyze Epic", "⚖️ Compare Epics"]
+tab_chat, tab_analyze, tab_compare, tab_attach = st.tabs(
+    ["💬 Chat", "🔍 Analyze Epic", "⚖️ Compare Epics", "📎 Attachment Analyzer"]
 )
 
 # --- Chat tab --------------------------------------------------------------
@@ -628,3 +628,143 @@ with tab_compare:
 
                 st.markdown("### Delta analysis")
                 _render_generic(result.get("comparison", {}))
+
+# --- Attachment Analyzer tab -----------------------------------------------
+with tab_attach:
+    st.subheader("Upload & analyze files with Claude")
+    st.caption(
+        "Drag and drop any files — screenshots, PDFs, text files, "
+        "spreadsheets, mockups, specs — and Claude will analyze them. "
+        "Images are read via Claude's vision capability so it can see "
+        "screenshots and diagrams. Text and PDF content is extracted "
+        "automatically. You can upload multiple files at once."
+    )
+
+    uploaded_files = st.file_uploader(
+        "Upload files",
+        accept_multiple_files=True,
+        type=None,  # accept all file types
+        help=(
+            "Supported: images (PNG, JPG, GIF, WebP), PDFs, text files "
+            "(TXT, MD, JSON, CSV, YAML, XML, HTML, code files), and "
+            "any other format (metadata-only for unsupported types). "
+            "Max 10 MB per file recommended for images."
+        ),
+    )
+
+    attach_epic_key = st.text_input(
+        "Optional: Jira epic key for additional context",
+        placeholder="e.g. PROD-3761 — leave blank to analyze files standalone",
+        key="attach_epic_key",
+    )
+
+    attach_question = st.text_area(
+        "What would you like to know about these files?",
+        placeholder=(
+            "Examples:\n"
+            "• Analyze these screenshots and identify UI issues\n"
+            "• What does this spec document say about the acceptance criteria?\n"
+            "• Compare these two mockups and list the differences\n"
+            "• Extract all test scenarios from this PDF\n"
+            "• What bugs or issues do you see in these screenshots?"
+        ),
+        height=120,
+        key="attach_question",
+    )
+
+    if uploaded_files:
+        with st.expander(
+            f"📁 {len(uploaded_files)} file(s) selected", expanded=True
+        ):
+            for uf in uploaded_files:
+                size_kb = len(uf.getvalue()) / 1024
+                icon = "🖼️" if uf.type and uf.type.startswith("image/") else (
+                    "📄" if uf.type == "application/pdf" else "📝"
+                )
+                st.caption(
+                    f"{icon} **{uf.name}** — {uf.type or 'unknown'}, "
+                    f"{size_kb:.1f} KB"
+                )
+
+    can_analyze = bool(uploaded_files) and bool(attach_question and attach_question.strip())
+
+    if st.button(
+        "Analyze files", type="primary", disabled=not can_analyze,
+        key="analyze_files_btn",
+    ):
+        from llm_client import get_backend
+
+        backend = get_backend()
+        attach_status = st.status("Preparing files for Claude...", expanded=True)
+        attach_bar = st.progress(0.0)
+
+        # Build the file list for the multimodal call.
+        file_dicts: List[Dict[str, Any]] = []
+        for i, uf in enumerate(uploaded_files):
+            raw = uf.getvalue()
+            mt = uf.type or "application/octet-stream"
+            file_dicts.append({
+                "name": uf.name,
+                "media_type": mt,
+                "data": raw,
+            })
+            attach_status.update(
+                label=f"Reading file {i + 1}/{len(uploaded_files)}: {uf.name}"
+            )
+            attach_bar.progress((i + 1) / (len(uploaded_files) + 1))
+
+        # Build the text prompt with optional Jira context.
+        prompt_parts = [attach_question.strip()]
+        if attach_epic_key and attach_epic_key.strip():
+            clean_ek = _extract_epic_key(attach_epic_key)
+            try:
+                attach_status.update(
+                    label=f"Fetching Jira context for {clean_ek}..."
+                )
+                epic_data = bundle["session"].agent.jira_client.get_epic_details(
+                    clean_ek
+                )
+                if epic_data:
+                    prompt_parts.append(
+                        f"\n\nJira context for epic {clean_ek}:\n"
+                        f"Summary: {epic_data.get('summary', '')}\n"
+                        f"Description: {epic_data.get('description', '')}\n"
+                        f"Status: {epic_data.get('status', '')}\n"
+                        f"Priority: {epic_data.get('priority', '')}"
+                    )
+            except Exception as e:
+                st.warning(f"Could not fetch Jira context: {e}")
+
+        system = (
+            "You are an expert software analyst with vision capabilities. "
+            "Analyze the provided files thoroughly. For images "
+            "(screenshots, mockups, diagrams), describe what you see in "
+            "detail and identify issues, patterns, or insights. For text "
+            "files and PDFs, extract key information. Provide structured, "
+            "actionable analysis. If a Jira epic context is provided, "
+            "relate your findings to that epic's scope."
+        )
+
+        attach_status.update(label="Claude is analyzing your files...")
+        attach_bar.progress(0.8)
+
+        try:
+            result_text = backend.complete_with_files(
+                system=system,
+                text_prompt="\n".join(prompt_parts),
+                files=file_dicts,
+            )
+            attach_status.update(
+                label=f"Analysis complete — {len(uploaded_files)} file(s) processed!",
+                state="complete",
+            )
+        except Exception as e:
+            result_text = None
+            attach_status.update(label=f"Analysis failed: {e}", state="error")
+            st.code(traceback.format_exc())
+        finally:
+            attach_bar.empty()
+
+        if result_text:
+            st.markdown("### Analysis results")
+            st.markdown(result_text)
