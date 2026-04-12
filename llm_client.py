@@ -113,7 +113,7 @@ class ApiKeyBackend(LLMBackend):
     def complete(self, system: str, user: str) -> str:
         resp = self._client.messages.create(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
@@ -131,7 +131,7 @@ class ApiKeyBackend(LLMBackend):
     ) -> ToolDecision:
         resp = self._client.messages.create(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=system,
             tools=tools,
             messages=history,

@@ -718,11 +718,29 @@ class TestCaseGenerator:
     # Response parsers
     # ------------------------------------------------------------------
     def _safe_load(self, response_text: str, default: Any) -> Any:
+        """Parse JSON from Claude's response. Handles truncated output
+        by progressively stripping trailing content until valid JSON is
+        found (covers the common case where max_tokens cuts mid-string
+        or mid-array)."""
+        text = _strip_json_fence(response_text)
         try:
-            return json.loads(_strip_json_fence(response_text))
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse failed: {str(e)}")
-            return default
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Attempt truncated-JSON recovery: find the last complete
+        # object/array by scanning backwards for a valid close.
+        for trim in range(1, min(len(text), 2000)):
+            candidate = text[:-trim].rstrip().rstrip(",")
+            # Try closing with the appropriate bracket(s).
+            for closer in ("}", "]}", "]}}", "]}]}"):
+                try:
+                    return json.loads(candidate + closer)
+                except json.JSONDecodeError:
+                    continue
+
+        logger.warning("JSON parse failed after recovery attempts")
+        return default
 
     def _parse_test_cases(self, response_text: str) -> Dict[str, Any]:
         parsed = self._safe_load(response_text, None)

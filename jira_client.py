@@ -215,6 +215,7 @@ class JiraClient:
                 f"OR parent = {epic_key} "
                 f"OR key = {epic_key}"
             )
+            logger.info("JQL query for epic: %s", jql)
             issues = self.client.search_issues(jql, maxResults=500)
             tickets = []
             for issue in issues:
@@ -464,12 +465,21 @@ class JiraClient:
 
                 out.append(record)
 
-            logger.info(
-                "Found %d attachments for %s (%d with text)",
-                len(out),
-                issue_key,
-                sum(1 for r in out if r.get("text_content")),
+            text_count = sum(1 for r in out if r.get("text_content"))
+            types = ", ".join(
+                sorted(set(r.get("mime_type", "?") for r in out))
             )
+            logger.info(
+                "Found %d attachments for %s (%d with text). Types: %s",
+                len(out), issue_key, text_count, types,
+            )
+            if out and text_count == 0:
+                logger.info(
+                    "No text extracted from %s attachments — all are "
+                    "binary formats (images, Office docs, etc). Enable "
+                    "'include_attachments' to see metadata in the prompt.",
+                    issue_key,
+                )
             return out
         except Exception as e:
             logger.error(

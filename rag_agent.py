@@ -86,6 +86,9 @@ class JiraRAGAgent:
         # Eagerly load per-ticket context. This is cheap compared to
         # the LLM calls that follow, and it lets us swap context options
         # later without re-hitting Jira.
+        total_comments = 0
+        total_attachments = 0
+        total_att_text = 0
         for ticket in tickets:
             key = ticket.get("key", "")
             if not key:
@@ -93,6 +96,18 @@ class JiraRAGAgent:
             ticket["comments"] = self.jira_client.get_issue_comments(key)
             ticket["changelog"] = self.jira_client.get_issue_changelog(key)
             ticket["attachments"] = self.jira_client.get_issue_attachments(key)
+            total_comments += len(ticket["comments"])
+            total_attachments += len(ticket["attachments"])
+            total_att_text += sum(
+                1 for a in ticket["attachments"] if a.get("text_content")
+            )
+
+        logger.info(
+            "Epic %s data fetched: %d tickets, %d comments, "
+            "%d attachments (%d with extracted text)",
+            epic_key, len(tickets), total_comments,
+            total_attachments, total_att_text,
+        )
 
         data = {
             "epic_key": epic_key,

@@ -465,15 +465,31 @@ class AgentSession:
             return {"jql": jql, "error": str(e)}
 
     # ------------------------------------------------------------------
-    def dispatch(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    def dispatch(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        progress_callback=None,
+    ) -> Dict[str, Any]:
         try:
             opts = _extract_context_options(tool_input)
+
+            # Bridge the 3-arg Chat-tab callback (status, progress, details)
+            # to the 2-arg ProgressFn (message, fraction) used by rag_agent.
+            def _progress(msg: str, frac: float) -> None:
+                if progress_callback:
+                    try:
+                        progress_callback(msg, frac, msg)
+                    except Exception:
+                        pass
+
             if tool_name == "analyzer":
                 return self.run_analyzer(
                     epic_key=tool_input["epic_key"],
                     focus=tool_input.get("focus", "summary"),
                     custom_question=tool_input.get("custom_question"),
                     context_options=opts,
+                    progress=_progress,
                 )
             if tool_name == "comparator":
                 return self.run_comparator(
@@ -481,6 +497,7 @@ class AgentSession:
                     epic_key_2=tool_input["epic_key_2"],
                     comparison_goal=tool_input.get("comparison_goal"),
                     context_options=opts,
+                    progress=_progress,
                 )
             if tool_name == "jira_search":
                 return self.run_jira_search(
@@ -608,7 +625,10 @@ def run_turn(
             (iteration + 0.3) * iteration_progress_step,
             f"Fetching and analyzing Jira data..."
         )
-        result = session.dispatch(decision.tool_name, decision.tool_input)
+        result = session.dispatch(
+            decision.tool_name, decision.tool_input,
+            progress_callback=progress_callback,
+        )
         logger.info(f"Tool {decision.tool_name} completed. Result type: {type(result)}, length: {len(str(result)) if result else 0}")
         _update_progress(
             f"Processing {decision.tool_name} results",
