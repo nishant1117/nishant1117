@@ -34,16 +34,27 @@ def _strip_json_fence(text: str) -> str:
 
 
 def _format_extras_block(ticket_data: Dict[str, Any]) -> str:
-    """Render optional context (subtasks, linked issues, attachments)
-    into a text block suitable for inclusion in any prompt. Each
-    section is only emitted if it's non-empty, so toggling a
+    """Render optional context (parent epic description, subtasks with
+    full descriptions, linked issues with descriptions, status change
+    timeline, and attachments with extracted text) into a text block
+    for inclusion in any prompt.
+
+    Each section is only emitted if non-empty, so toggling a
     ContextOptions flag cleanly removes it from the prompt.
     """
     lines: List[str] = []
 
+    # --- Parent epic context (injected by rag_agent before prompting) ---
+    parent_desc = ticket_data.get("parent_epic_description") or ""
+    if parent_desc:
+        lines.append("\nPARENT EPIC DESCRIPTION:")
+        for ln in parent_desc.strip().splitlines()[:100]:
+            lines.append(f"  {ln}")
+
+    # --- Subtasks with full descriptions ---
     subtasks = ticket_data.get("subtasks") or []
     if subtasks:
-        lines.append("\nCHILD TICKETS (subtasks):")
+        lines.append(f"\nCHILD TICKETS ({len(subtasks)} subtasks):")
         for s in subtasks:
             lines.append(
                 f"- {s.get('key', '')} [{s.get('status', '')}] "
@@ -54,37 +65,72 @@ def _format_extras_block(ticket_data: Dict[str, Any]) -> str:
                     else ""
                 )
             )
+            desc = (s.get("description") or "").strip()
+            if desc:
+                lines.append("  Description:")
+                for ln in desc.splitlines()[:30]:
+                    lines.append(f"    {ln}")
+                if len(desc.splitlines()) > 30:
+                    lines.append("    ...[truncated]")
 
+    # --- Linked issues with full descriptions ---
     linked = ticket_data.get("linked_issues") or []
     if linked:
-        lines.append("\nLINKED TICKETS:")
-        for l in linked:
-            link_type = l.get("link_type") or l.get("direction") or ""
+        lines.append(f"\nLINKED TICKETS ({len(linked)}):")
+        for lnk in linked:
+            link_type = lnk.get("link_type") or lnk.get("direction") or ""
             lines.append(
-                f"- {l.get('key', '')} [{l.get('status', '')}] "
-                f"({link_type}) {l.get('summary', '')}"
+                f"- {lnk.get('key', '')} [{lnk.get('status', '')}] "
+                f"({link_type}) {lnk.get('summary', '')}"
+            )
+            desc = (lnk.get("description") or "").strip()
+            if desc:
+                lines.append("  Description:")
+                for ln in desc.splitlines()[:30]:
+                    lines.append(f"    {ln}")
+                if len(desc.splitlines()) > 30:
+                    lines.append("    ...[truncated]")
+
+    # --- Explicit status change timeline ---
+    changelog = ticket_data.get("changelog") or []
+    status_changes = [c for c in changelog if c.get("is_status_change")]
+    if status_changes:
+        lines.append(
+            f"\nSTATUS CHANGE HISTORY ({len(status_changes)} transitions):"
+        )
+        for sc in status_changes:
+            lines.append(
+                f"- {sc.get('created', '')}: "
+                f"{sc.get('from_value', '?')} → {sc.get('to_value', '?')} "
+                f"(by {sc.get('author', '')})"
             )
 
+    # --- Attachments with extracted text (text files + PDFs) ---
     attachments = ticket_data.get("attachments") or []
     if attachments:
-        lines.append("\nATTACHMENTS:")
+        text_count = sum(1 for a in attachments if a.get("text_content"))
+        lines.append(
+            f"\nATTACHMENTS ({len(attachments)} files, "
+            f"{text_count} with extracted text):"
+        )
         for a in attachments:
             size_kb = (a.get("size", 0) or 0) / 1024.0
+            method = a.get("extraction_method") or ""
             lines.append(
                 f"- {a.get('filename', '')} "
                 f"({a.get('mime_type', '')}, {size_kb:.1f} KB) "
                 f"by {a.get('author', '')}"
+                + (f" [extracted via {method}]" if method else "")
             )
             if a.get("text_content"):
-                # Indent file contents so Claude knows where the
-                # attachment body starts and ends.
                 text = a["text_content"]
-                lines.append("  --- file contents ---")
-                for ln in text.splitlines()[:200]:  # safety cap per file
-                    lines.append(f"  {ln}")
-                if len(text.splitlines()) > 200:
-                    lines.append("  ...[truncated]")
-                lines.append("  --- end of file ---")
+                lines.append("  ╔══ file contents ══╗")
+                content_lines = text.splitlines()
+                for ln in content_lines[:300]:
+                    lines.append(f"  ║ {ln}")
+                if len(content_lines) > 300:
+                    lines.append("  ║ ...[truncated]")
+                lines.append("  ╚══ end of file ══╝")
 
     return "\n".join(lines)
 

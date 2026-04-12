@@ -139,6 +139,11 @@ class JiraRAGAgent:
             for ticket in tickets:
                 logger.info(f"Processing ticket: {ticket.get('key', '')}")
                 filtered = self._filter_ticket(ticket, opts)
+                # Inject parent epic description so Claude always knows
+                # the broader context this ticket lives in.
+                filtered["parent_epic_description"] = epic_details.get(
+                    "description", ""
+                )
                 results["tickets"][ticket["key"]] = self._process_ticket(filtered)
 
             logger.info(f"Completed processing epic {epic_key}")
@@ -170,9 +175,15 @@ class JiraRAGAgent:
     def _prepare_documents(
         self, epic_details: Dict[str, Any], tickets: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Prepare documents from epic and tickets for vector store"""
+        """Prepare documents from epic and tickets for the vector store.
+
+        Now indexes much richer content per ticket — descriptions,
+        comments, subtask summaries, and attachment text — so the RAG
+        retrieval step returns genuinely useful context to Claude.
+        """
         documents: List[Dict[str, Any]] = []
 
+        # --- Epic-level document ---
         epic_content = "\n".join([
             f"Epic: {epic_details.get('key', '')}",
             f"Summary: {epic_details.get('summary', '')}",
@@ -182,7 +193,6 @@ class JiraRAGAgent:
             f"Created: {epic_details.get('created', '')}",
             f"Updated: {epic_details.get('updated', '')}",
         ]).strip()
-
         documents.append({
             "id": f"epic_{epic_details.get('key', 'unknown')}",
             "content": epic_content,
@@ -191,9 +201,13 @@ class JiraRAGAgent:
             "ticket_key": epic_details.get("key", ""),
         })
 
+        # --- Per-ticket documents ---
         for ticket in tickets:
+            tk = ticket.get("key", "unknown")
+
+            # Core ticket document (description + acceptance criteria).
             content_parts = [
-                f"Ticket: {ticket.get('key', '')}",
+                f"Ticket: {tk}",
                 f"Summary: {ticket.get('summary', '')}",
                 f"Description: {ticket.get('description', '')}",
                 f"Status: {ticket.get('status', '')}",
@@ -202,12 +216,64 @@ class JiraRAGAgent:
                 f"Acceptance Criteria: {ticket.get('acceptance_criteria', '')}",
             ]
             documents.append({
-                "id": f"ticket_{ticket.get('key', 'unknown')}",
+                "id": f"ticket_{tk}",
                 "content": "\n".join(content_parts).strip(),
-                "source": ticket.get("key", ""),
+                "source": tk,
                 "type": "ticket",
-                "ticket_key": ticket.get("key", ""),
+                "ticket_key": tk,
             })
+
+            # Comments document (all comment bodies concatenated).
+            comments = ticket.get("comments") or []
+            if comments:
+                comment_text = "\n\n".join(
+                    f"[{c.get('author', '')} on {c.get('created', '')}]\n"
+                    f"{c.get('body', '')}"
+                    for c in comments
+                )
+                documents.append({
+                    "id": f"comments_{tk}",
+                    "content": f"Comments for {tk}:\n{comment_text}",
+                    "source": tk,
+                    "type": "comments",
+                    "ticket_key": tk,
+                })
+
+            # Subtask descriptions.
+            subtasks = ticket.get("subtasks") or []
+            if subtasks:
+                sub_text = "\n".join(
+                    f"- {s.get('key', '')} [{s.get('status', '')}] "
+                    f"{s.get('summary', '')}: "
+                    f"{(s.get('description') or '')[:500]}"
+                    for s in subtasks
+                )
+                documents.append({
+                    "id": f"subtasks_{tk}",
+                    "content": f"Subtasks for {tk}:\n{sub_text}",
+                    "source": tk,
+                    "type": "subtasks",
+                    "ticket_key": tk,
+                })
+
+            # Attachment text content.
+            attachments = ticket.get("attachments") or []
+            att_texts = [
+                f"[{a.get('filename', '')}]\n{a.get('text_content', '')}"
+                for a in attachments
+                if a.get("text_content")
+            ]
+            if att_texts:
+                documents.append({
+                    "id": f"attachments_{tk}",
+                    "content": (
+                        f"Attachment contents for {tk}:\n"
+                        + "\n\n---\n\n".join(att_texts)
+                    ),
+                    "source": tk,
+                    "type": "attachments",
+                    "ticket_key": tk,
+                })
 
         return documents
 

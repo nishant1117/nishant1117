@@ -143,6 +143,45 @@ TOOLS: List[Dict[str, Any]] = [
             "required": ["epic_key_1", "epic_key_2"],
         },
     },
+    {
+        "name": "jira_search",
+        "description": (
+            "Execute a JQL (Jira Query Language) query against the Jira "
+            "instance and return matching tickets with their summaries, "
+            "descriptions, comments, and attachment metadata. Use this "
+            "whenever the user asks to find, search for, or list tickets "
+            "that match specific criteria (project, status, label, "
+            "assignee, sprint, date range, text, etc.). Construct the "
+            "JQL string yourself based on the user's intent. Examples:\n"
+            "  - 'project = HT AND status = \"In Progress\"'\n"
+            "  - 'assignee = currentUser() AND sprint in openSprints()'\n"
+            "  - 'text ~ \"payment\" AND priority = High'\n"
+            "  - 'labels = backend AND updated >= -7d'\n"
+            "Also useful as a follow-up after an analysis to find "
+            "related tickets the user didn't explicitly mention."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "jql": {
+                    "type": "string",
+                    "description": (
+                        "A valid JQL query string. Use standard Jira "
+                        "fields (project, status, priority, assignee, "
+                        "labels, sprint, issuetype, created, updated, "
+                        "resolution, text, summary, description)."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": (
+                        "Maximum number of results to return. Default 20."
+                    ),
+                },
+            },
+            "required": ["jql"],
+        },
+    },
 ]
 
 
@@ -171,24 +210,36 @@ def _extract_context_options(tool_input: Dict[str, Any]) -> ContextOptions:
 
 SYSTEM_PROMPT = textwrap.dedent(
     """
-    You are the orchestrator for a Jira RAG agent. Your job is to help the
-    user analyze and compare Jira epics by calling the `analyzer` and
-    `comparator` tools. Always:
+    You are the orchestrator for a Jira RAG agent with three tools:
 
-    1. Parse the user's request. If they mention one epic, use `analyzer`.
-       If they mention two, use `comparator`.
-    2. Pick the narrowest `focus` that satisfies their question so the tool
-       result stays small and targeted. Only use `focus: "full"` when they
-       explicitly ask for an exhaustive overview.
-    3. After the tool result comes back, answer the user in clear prose
-       grounded in the tool output. Cite ticket keys, bug ids, and risk
-       levels verbatim. Do not invent data.
-    4. If the user follows up, reuse cached results where possible rather
-       than re-running expensive pipelines. Only re-run when the request
-       needs fresh data or a different focus.
-    5. If the user's request is ambiguous (missing epic key, unclear
-       intent), ask a single concise clarifying question instead of
-       guessing.
+    1. `analyzer`    — deep analysis of a single epic (test cases,
+       edge cases, regression, bugs, insights, recommendations, action
+       plan). Pulls parent epic description, child ticket descriptions,
+       linked ticket descriptions, all comments, full changelog with
+       status transitions, and file attachments (text + PDF extracted).
+    2. `comparator`  — side-by-side delta analysis of two epics.
+    3. `jira_search` — execute an arbitrary JQL query and return
+       matching tickets with their descriptions, comments, and
+       attachment metadata. Use this when the user asks to find, list,
+       or search for tickets by criteria (project, status, assignee,
+       label, sprint, date, text, etc.). Construct the JQL yourself.
+
+    Rules:
+    - If the user mentions one epic key, use `analyzer`.
+    - If the user mentions two epic keys, use `comparator`.
+    - If the user asks to search / find / list tickets by criteria,
+      use `jira_search` with the appropriate JQL.
+    - Pick the narrowest `focus` that satisfies the question. Only
+      use `focus: "full"` when they explicitly ask for everything.
+    - When the user wants attachment content analyzed, set
+      `include_attachments: true` so PDF and text files are read.
+    - After the tool result comes back, answer in clear prose grounded
+      in the tool output. Cite ticket keys, bug ids, and risk levels
+      verbatim. Do not invent data.
+    - If the user follows up, reuse cached results rather than
+      re-running. Only re-run when the request needs fresh data or
+      a different focus.
+    - If the request is ambiguous, ask one concise clarifying question.
     """
 ).strip()
 
@@ -388,6 +439,29 @@ class AgentSession:
         }
 
     # ------------------------------------------------------------------
+    def run_jira_search(
+        self, jql: str, max_results: int = 20
+    ) -> Dict[str, Any]:
+        """Execute a JQL query via the Jira client and return results.
+
+        This is the backing method for the `jira_search` tool. Claude
+        constructs the JQL string in the Chat tab and the results are
+        returned as structured data.
+        """
+        try:
+            results = self.agent.jira_client.search_jql(
+                jql, max_results=max_results
+            )
+            return {
+                "jql": jql,
+                "result_count": len(results),
+                "tickets": results,
+            }
+        except Exception as e:
+            logger.exception("JQL search failed")
+            return {"jql": jql, "error": str(e)}
+
+    # ------------------------------------------------------------------
     def dispatch(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
         try:
             opts = _extract_context_options(tool_input)
@@ -404,6 +478,11 @@ class AgentSession:
                     epic_key_2=tool_input["epic_key_2"],
                     comparison_goal=tool_input.get("comparison_goal"),
                     context_options=opts,
+                )
+            if tool_name == "jira_search":
+                return self.run_jira_search(
+                    jql=tool_input["jql"],
+                    max_results=int(tool_input.get("max_results", 20)),
                 )
             return {"error": f"Unknown tool: {tool_name}"}
         except Exception as e:
