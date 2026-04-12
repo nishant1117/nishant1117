@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from jira import JIRA
@@ -107,18 +108,49 @@ def _extract_pdf_text(raw_bytes: bytes, max_chars: int = _MAX_ATTACHMENT_BYTES) 
 # ---------------------------------------------------------------------------
 # Jira client
 # ---------------------------------------------------------------------------
+def _retry_on_timeout(max_retries: int = 3, backoff_factor: float = 1.0):
+    """Decorator to retry Jira operations on timeout/connection errors."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    is_timeout = "timeout" in error_msg or "connection" in error_msg
+                    is_last_attempt = attempt == max_retries - 1
+                    
+                    if is_timeout and not is_last_attempt:
+                        wait_time = backoff_factor * (2 ** attempt)
+                        logger.warning(
+                            "Timeout/connection error on attempt %d/%d. "
+                            "Retrying in %ds: %s",
+                            attempt + 1,
+                            max_retries,
+                            wait_time,
+                            e,
+                        )
+                        time.sleep(wait_time)
+                    else:
+                        raise
+        return wrapper
+    return decorator
+
+
 class JiraClient:
     def __init__(self):
         """Initialize Jira client"""
         self.client = JIRA(
             server=config.JIRA_HOST,
             basic_auth=(config.JIRA_EMAIL, config.JIRA_API_TOKEN),
+            options={"server": config.JIRA_HOST, "timeout": config.JIRA_TIMEOUT},
         )
         logger.info("Connected to Jira: %s", config.JIRA_HOST)
 
     # ------------------------------------------------------------------
     # JQL search — used by the Chat tab's jira_search tool
     # ------------------------------------------------------------------
+    @_retry_on_timeout(max_retries=3, backoff_factor=1.0)
     def search_jql(
         self,
         jql: str,
@@ -180,6 +212,7 @@ class JiraClient:
     # ------------------------------------------------------------------
     # Epic-level fetching
     # ------------------------------------------------------------------
+    @_retry_on_timeout(max_retries=3, backoff_factor=1.0)
     def get_epic_details(self, epic_key: str) -> Dict[str, Any]:
         """Fetch epic details"""
         try:
@@ -201,6 +234,7 @@ class JiraClient:
             logger.error("Failed to fetch epic %s: %s", epic_key, e)
             return {}
 
+    @_retry_on_timeout(max_retries=3, backoff_factor=1.0)
     def get_epic_issues(self, epic_key: str) -> List[Dict[str, Any]]:
         """Fetch all issues linked to an epic.
 

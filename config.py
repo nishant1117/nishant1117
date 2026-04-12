@@ -94,6 +94,15 @@ class _Config:
     def MAX_TEST_CASES_PER_TICKET(self) -> int:
         return _int("MAX_TEST_CASES_PER_TICKET", "15")
 
+    # --- Connection timeouts ---
+    @property
+    def JIRA_TIMEOUT(self) -> int:
+        return _int("JIRA_TIMEOUT", "30")
+
+    @property
+    def API_TIMEOUT(self) -> int:
+        return _int("API_TIMEOUT", "60")
+
 
 config = _Config()
 Config = _Config  # backwards-compatible alias
