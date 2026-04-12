@@ -46,6 +46,103 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# File content extraction (shared by all backends)
+# ---------------------------------------------------------------------------
+_EXCEL_MIMES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+}
+_EXCEL_EXTS = {".xlsx", ".xls"}
+_CSV_MIMES = {"text/csv", "application/csv", "text/comma-separated-values"}
+_CSV_EXTS = {".csv", ".tsv"}
+
+
+def _extract_file_text(
+    name: str, media_type: str, raw: bytes, max_chars: int = 200_000
+) -> tuple[str, str]:
+    """Best-effort text extraction from any file.
+
+    Returns ``(extracted_text, method)`` where method is one of:
+    ``"text"``, ``"pdf"``, ``"excel"``, ``"csv"``, ``"binary_skip"``.
+    """
+    mt = (media_type or "").lower()
+    lower_name = (name or "").lower()
+
+    # --- CSV / TSV ---
+    if mt in _CSV_MIMES or any(lower_name.endswith(e) for e in _CSV_EXTS):
+        try:
+            import pandas as pd
+            sep = "\t" if lower_name.endswith(".tsv") else ","
+            df = pd.read_csv(io.BytesIO(raw), sep=sep, nrows=5000)
+            text = (
+                f"[CSV/TSV: {name} — {len(df)} rows × {len(df.columns)} cols]\n"
+                f"Columns: {', '.join(df.columns.tolist())}\n\n"
+                f"First 5 rows:\n{df.head().to_string(index=False)}\n\n"
+                f"Data types:\n{df.dtypes.to_string()}\n\n"
+                f"Summary stats:\n{df.describe(include='all').to_string()}\n\n"
+                f"Full data ({min(len(df), 500)} rows shown):\n"
+                f"{df.head(500).to_string(index=False)}"
+            )
+            return text[:max_chars], "csv"
+        except Exception as e:
+            logger.warning("CSV parse failed for %s: %s", name, e)
+            # Fall through to text decode attempt below
+
+    # --- Excel (xlsx / xls) ---
+    if mt in _EXCEL_MIMES or any(lower_name.endswith(e) for e in _EXCEL_EXTS):
+        try:
+            import pandas as pd
+            sheets = pd.read_excel(io.BytesIO(raw), sheet_name=None, nrows=5000)
+            parts = [f"[Excel: {name} — {len(sheets)} sheet(s)]"]
+            for sheet_name, df in sheets.items():
+                parts.append(
+                    f"\n{'='*60}\n"
+                    f"Sheet: {sheet_name} ({len(df)} rows × {len(df.columns)} cols)\n"
+                    f"Columns: {', '.join(str(c) for c in df.columns.tolist())}\n\n"
+                    f"First 5 rows:\n{df.head().to_string(index=False)}\n\n"
+                    f"Data types:\n{df.dtypes.to_string()}\n\n"
+                    f"Summary stats:\n{df.describe(include='all').to_string()}\n\n"
+                    f"Full data ({min(len(df), 500)} rows shown):\n"
+                    f"{df.head(500).to_string(index=False)}"
+                )
+            text = "\n".join(parts)
+            return text[:max_chars], "excel"
+        except Exception as e:
+            logger.warning("Excel parse failed for %s: %s", name, e)
+            return f"[Excel file: {name}, parse error: {e}]", "binary_skip"
+
+    # --- PDF ---
+    if mt == "application/pdf" or lower_name.endswith(".pdf"):
+        try:
+            from jira_client import _extract_pdf_text
+            text = _extract_pdf_text(raw, max_chars=max_chars)
+            if text:
+                return text, "pdf"
+        except Exception:
+            pass
+        return f"[PDF: {name}, {len(raw)} bytes — no text extracted]", "binary_skip"
+
+    # --- Plain text / code / markup ---
+    if (
+        mt.startswith("text/")
+        or mt in ("application/json", "application/xml", "application/csv")
+        or any(
+            lower_name.endswith(ext)
+            for ext in (
+                ".txt", ".md", ".json", ".yml", ".yaml", ".xml",
+                ".html", ".htm", ".csv", ".log", ".py", ".js", ".ts",
+                ".java", ".sql", ".sh", ".cfg", ".ini", ".toml",
+                ".graphql", ".proto", ".env",
+            )
+        )
+    ):
+        return raw.decode("utf-8", errors="replace")[:max_chars], "text"
+
+    # --- Unknown binary ---
+    return f"[Binary file: {name}, {mt}, {len(raw)} bytes]", "binary_skip"
+
+
+# ---------------------------------------------------------------------------
 # Data types shared by both backends
 # ---------------------------------------------------------------------------
 @dataclass
@@ -92,32 +189,13 @@ class LLMBackend(ABC):
         whatever text it can and ignores images). Backends with vision
         support override this.
         """
-        # Fallback: extract text from files and concatenate with prompt.
         parts = [text_prompt]
         for f in files:
-            mt = f.get("media_type", "")
             name = f.get("name", "file")
+            mt = f.get("media_type", "")
             raw = f.get("data", b"")
-            if mt.startswith("text/") or mt in (
-                "application/json", "application/xml", "application/csv",
-            ):
-                parts.append(
-                    f"\n--- {name} ---\n"
-                    + raw.decode("utf-8", errors="replace")[:200_000]
-                )
-            elif mt == "application/pdf":
-                text = ""
-                try:
-                    from jira_client import _extract_pdf_text
-                    text = _extract_pdf_text(raw)
-                except Exception:
-                    pass
-                if text:
-                    parts.append(f"\n--- {name} (PDF extracted text) ---\n{text}")
-                else:
-                    parts.append(f"\n[Attached PDF: {name}, {len(raw)} bytes — no text extracted]")
-            else:
-                parts.append(f"\n[Attached file: {name}, {mt}, {len(raw)} bytes]")
+            text, method = _extract_file_text(name, mt, raw)
+            parts.append(f"\n--- {name} [{method}] ---\n{text}\n--- end ---")
         return self.complete(system, "\n".join(parts))
 
     @abstractmethod
@@ -179,23 +257,21 @@ class ApiKeyBackend(LLMBackend):
         text_prompt: str,
         files: List[Dict[str, Any]],
     ) -> str:
-        """Multimodal: sends images as vision blocks so Claude can
-        actually *see* screenshots, diagrams, mockups, etc."""
+        """Multimodal: images go as vision blocks, PDFs/Excel/CSV get
+        their text extracted via Python libraries, everything else is
+        decoded as text when possible."""
         content: List[Dict[str, Any]] = []
-
-        # Add text prompt first.
         content.append({"type": "text", "text": text_prompt})
 
-        # Process each file.
         for f in files:
-            mt = f.get("media_type", "") or ""
+            mt = (f.get("media_type", "") or "").lower()
             name = f.get("name", "file")
             raw: bytes = f.get("data", b"")
             if not raw:
                 continue
 
+            # Images → Claude vision (base64 content blocks).
             if mt.startswith("image/"):
-                # Vision: encode as base64 image block.
                 b64 = base64.standard_b64encode(raw).decode("ascii")
                 content.append({
                     "type": "image",
@@ -209,35 +285,13 @@ class ApiKeyBackend(LLMBackend):
                     "type": "text",
                     "text": f"[Above image: {name}]",
                 })
-            elif mt == "application/pdf":
-                text = ""
-                try:
-                    from jira_client import _extract_pdf_text
-                    text = _extract_pdf_text(raw)
-                except Exception:
-                    pass
-                if text:
-                    content.append({
-                        "type": "text",
-                        "text": f"--- {name} (PDF) ---\n{text}\n--- end ---",
-                    })
-                else:
-                    content.append({
-                        "type": "text",
-                        "text": f"[PDF: {name}, {len(raw)} bytes, no text extracted]",
-                    })
-            elif mt.startswith("text/") or mt in (
-                "application/json", "application/xml",
-            ):
-                decoded = raw.decode("utf-8", errors="replace")[:200_000]
-                content.append({
-                    "type": "text",
-                    "text": f"--- {name} ---\n{decoded}\n--- end ---",
-                })
             else:
+                # Everything else: extract text via the shared helper
+                # (handles PDF, Excel, CSV, plain text, code, etc.)
+                text, method = _extract_file_text(name, mt, raw)
                 content.append({
                     "type": "text",
-                    "text": f"[Binary file: {name}, {mt}, {len(raw)} bytes]",
+                    "text": f"--- {name} [{method}] ---\n{text}\n--- end ---",
                 })
 
         resp = self._client.messages.create(

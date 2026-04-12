@@ -632,12 +632,17 @@ with tab_compare:
 # --- Attachment Analyzer tab -----------------------------------------------
 with tab_attach:
     st.subheader("Upload & analyze files with Claude")
-    st.caption(
-        "Drag and drop any files — screenshots, PDFs, text files, "
-        "spreadsheets, mockups, specs — and Claude will analyze them. "
-        "Images are read via Claude's vision capability so it can see "
-        "screenshots and diagrams. Text and PDF content is extracted "
-        "automatically. You can upload multiple files at once."
+    st.markdown(
+        "Drag and drop any files and Claude will analyze them. "
+        "Supported formats:\n\n"
+        "| Type | How it's parsed |\n"
+        "|---|---|\n"
+        "| **Images** (PNG, JPG, GIF, WebP) | Claude **sees** them via vision |\n"
+        "| **PDFs** | Text extracted page-by-page via `pypdf` |\n"
+        "| **Excel** (.xlsx, .xls) | All sheets parsed — columns, data types, stats, rows |\n"
+        "| **CSV / TSV** | Parsed with pandas — columns, stats, full data |\n"
+        "| **Text / Code** (.txt, .md, .json, .yaml, .py, .sql, etc.) | Read as UTF-8 |\n"
+        "| **Other binary** | Listed by filename only |"
     )
 
     uploaded_files = st.file_uploader(
@@ -645,10 +650,10 @@ with tab_attach:
         accept_multiple_files=True,
         type=None,  # accept all file types
         help=(
-            "Supported: images (PNG, JPG, GIF, WebP), PDFs, text files "
-            "(TXT, MD, JSON, CSV, YAML, XML, HTML, code files), and "
-            "any other format (metadata-only for unsupported types). "
-            "Max 10 MB per file recommended for images."
+            "Upload multiple files at once. Excel and CSV files are fully "
+            "parsed (all sheets, all rows up to 5000, column types, summary "
+            "stats). PDFs are text-extracted. Images are sent to Claude's "
+            "vision so it can see screenshots and diagrams."
         ),
     )
 
@@ -678,12 +683,24 @@ with tab_attach:
         ):
             for uf in uploaded_files:
                 size_kb = len(uf.getvalue()) / 1024
-                icon = "🖼️" if uf.type and uf.type.startswith("image/") else (
-                    "📄" if uf.type == "application/pdf" else "📝"
-                )
+                lower = (uf.name or "").lower()
+                if uf.type and uf.type.startswith("image/"):
+                    icon = "🖼️"
+                    how = "vision"
+                elif lower.endswith(".pdf") or uf.type == "application/pdf":
+                    icon = "📄"
+                    how = "PDF text extraction"
+                elif lower.endswith((".xlsx", ".xls")):
+                    icon = "📊"
+                    how = "Excel parser (all sheets)"
+                elif lower.endswith((".csv", ".tsv")):
+                    icon = "📊"
+                    how = "CSV/TSV parser (pandas)"
+                else:
+                    icon = "📝"
+                    how = "text"
                 st.caption(
-                    f"{icon} **{uf.name}** — {uf.type or 'unknown'}, "
-                    f"{size_kb:.1f} KB"
+                    f"{icon} **{uf.name}** — {size_kb:.1f} KB → *{how}*"
                 )
 
     can_analyze = bool(uploaded_files) and bool(attach_question and attach_question.strip())
