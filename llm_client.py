@@ -468,21 +468,35 @@ class SubscriptionBackend(LLMBackend):
     # ------------------------------------------------------------------
     async def _query_async(self, system: str, user: str) -> str:
         from claude_agent_sdk import query, ClaudeAgentOptions
+        # When running inside a Claude Code session, env vars like
+        # CLAUDE_CODE_OAUTH_TOKEN and CLAUDE_CODE_SSE_PORT are inherited by
+        # child processes. The SDK merges options.env on top of os.environ,
+        # so we override them with empty strings — the CLI treats those as
+        # unset and falls back to its own stored credentials.
+        stderr_lines: list[str] = []
         options = ClaudeAgentOptions(
             model=self._model,
             system_prompt=system,
             max_turns=1,
             permission_mode="bypassPermissions",
+            env={
+                "CLAUDE_CODE_OAUTH_TOKEN": "",
+                "CLAUDE_CODE_SSE_PORT": "",
+            },
+            stderr=stderr_lines.append,
         )
         text_parts: List[str] = []
         try:
             async for message in query(prompt=user, options=options):
                 text_parts.append(_extract_text_from_sdk_message(message))
         except Exception as e:
-            logger.exception("Claude Agent SDK query failed")
+            stderr_text = "".join(stderr_lines).strip()
+            logger.exception("Claude Agent SDK query failed. stderr: %s", stderr_text)
             raise RuntimeError(
-                f"Claude Agent SDK call failed: {e}. Make sure Claude Code "
-                "is installed (`npm install -g @anthropic-ai/claude-code`) "
+                f"Claude Agent SDK call failed: {e}"
+                + (f". Stderr: {stderr_text}" if stderr_text else "")
+                + ". Make sure Claude Code is installed "
+                "(`npm install -g @anthropic-ai/claude-code`) "
                 "and you are logged in (`claude /login`)."
             ) from e
         return "".join(text_parts).strip()

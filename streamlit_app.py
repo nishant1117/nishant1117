@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 import streamlit as st
+from dotenv import load_dotenv
+
+# Load .env file to populate os.environ
+load_dotenv()
 
 
 def _extract_epic_key(input_str: str) -> str:
@@ -149,55 +153,46 @@ if _RADIO_KEY not in st.session_state:
 # ---------------------------------------------------------------------------
 st.sidebar.title("Credentials")
 st.sidebar.markdown(
-    "Enter once, then use the tabs on the right. These values live in "
-    "this browser session only, unless you click **Save to disk** "
-    "(which writes to `.streamlit/secrets.toml`, a gitignored file on "
-    "your computer)."
+    "✅ **All credentials loaded from `.streamlit/secrets.toml`**\n\n"
+    "- **Jira Host:** Loaded ✓\n"
+    "- **Jira Email:** Loaded ✓\n"
+    "- **Jira API Token:** Loaded ✓\n"
+    "- **Claude OAuth Token:** Loaded ✓\n\n"
+    "To update, edit `.streamlit/secrets.toml` or use the form below."
 )
 
 st.session_state.jira_host = st.sidebar.text_input(
     "Jira URL",
     value=st.session_state.jira_host,
     help="e.g. https://your-domain.atlassian.net",
+    disabled=True,
 )
 st.session_state.jira_email = st.sidebar.text_input(
     "Jira email",
     value=st.session_state.jira_email,
+    disabled=True,
 )
 st.session_state.jira_token = st.sidebar.text_input(
     "Jira API token",
-    value=st.session_state.jira_token,
+    value="***" if st.session_state.jira_token else "",
     type="password",
-    help="Generate at https://id.atlassian.com/manage-profile/security/api-tokens",
+    help="Loaded from secrets.toml",
+    disabled=True,
 )
 st.session_state.claude_oauth_token = st.sidebar.text_input(
     "Claude OAuth Token",
-    value=st.session_state.claude_oauth_token,
+    value="***" if st.session_state.claude_oauth_token else "",
     type="password",
-    help="Run 'claude setup-token' to generate a long-lived token",
+    help="Loaded from secrets.toml",
+    disabled=True,
 )
 st.session_state.model = st.sidebar.text_input(
     "Claude model",
     value=st.session_state.model,
+    disabled=True,
 )
 
-col_a, col_b = st.sidebar.columns(2)
-if col_a.button("Use for session", use_container_width=True):
-    st.sidebar.success("Credentials active for this session.")
-if col_b.button("Save to disk", use_container_width=True):
-    try:
-        _save_secrets_to_disk({
-            "jira_host": st.session_state.jira_host,
-            "jira_email": st.session_state.jira_email,
-            "jira_token": st.session_state.jira_token,
-            "claude_oauth_token": st.session_state.claude_oauth_token,
-            "model": st.session_state.model,
-        })
-        st.sidebar.success(
-            f"Saved to `{SECRETS_PATH}`. The file is gitignored."
-        )
-    except Exception as e:
-        st.sidebar.error(f"Could not save: {e}")
+st.sidebar.success("✅ All credentials are pre-loaded and ready!")
 
 # Push credentials into the environment so config.py (lazy) picks them up.
 os.environ["JIRA_HOST"] = st.session_state.jira_host or ""
