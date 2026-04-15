@@ -238,15 +238,35 @@ class ApiKeyBackend(LLMBackend):
         self._client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
         self._model = config.CLAUDE_MODEL
 
+    def _extended_thinking_kwargs(self) -> Dict[str, Any]:
+        """Return extra kwargs for extended thinking when enabled.
+
+        Extended thinking lets Claude reason through complex problems
+        before answering, producing higher-quality output on analysis
+        tasks. Enabled by default; disable via ``CLAUDE_EXTENDED_THINKING=false``.
+        """
+        if os.getenv("CLAUDE_EXTENDED_THINKING", "true").lower() in (
+            "1", "true", "yes", "on"
+        ):
+            budget = int(os.getenv("CLAUDE_THINKING_BUDGET", "4096"))
+            return {
+                "thinking": {"type": "enabled", "budget_tokens": budget},
+                # max_tokens must exceed thinking budget + output.
+                "max_tokens": max(16384, budget + 8192),
+            }
+        return {"max_tokens": 8192}
+
     def complete(self, system: str, user: str) -> str:
+        kwargs = self._extended_thinking_kwargs()
         resp = self._client.messages.create(
             model=self._model,
-            max_tokens=8192,
             system=system,
             messages=[{"role": "user", "content": user}],
+            **kwargs,
         )
         out: List[str] = []
         for block in resp.content:
+            # Skip thinking blocks; only collect text output.
             if getattr(block, "type", None) == "text" and getattr(block, "text", None):
                 out.append(block.text)
         return "\n".join(out).strip()
@@ -294,11 +314,12 @@ class ApiKeyBackend(LLMBackend):
                     "text": f"--- {name} [{method}] ---\n{text}\n--- end ---",
                 })
 
+        kwargs = self._extended_thinking_kwargs()
         resp = self._client.messages.create(
             model=self._model,
-            max_tokens=8192,
             system=system,
             messages=[{"role": "user", "content": content}],
+            **kwargs,
         )
         out: List[str] = []
         for block in resp.content:
@@ -312,6 +333,9 @@ class ApiKeyBackend(LLMBackend):
         tools: List[Dict[str, Any]],
         history: List[Dict[str, Any]],
     ) -> ToolDecision:
+        # Tool routing doesn't benefit from extended thinking (it's a
+        # simple "pick a tool name" decision), but keep max_tokens high
+        # to avoid truncation on large tool schemas / histories.
         resp = self._client.messages.create(
             model=self._model,
             max_tokens=8192,

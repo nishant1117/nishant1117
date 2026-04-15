@@ -21,15 +21,101 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 from dotenv import load_dotenv
 
 # Load .env file to populate os.environ
 load_dotenv()
+
+
+# ---------------------------------------------------------------------------
+# Claude Code credential auto-discovery
+# ---------------------------------------------------------------------------
+def _read_claude_credentials_file() -> Optional[str]:
+    """Best-effort read of the OAuth token Claude Code stores on disk
+    after `claude /login`. Returns None if not found.
+
+    Locations (in priority order) across macOS / Linux installs:
+      ~/.claude/.credentials.json
+      ~/.config/claude/credentials.json
+      ~/.claude/credentials.json
+    """
+    home = Path.home()
+    candidates = [
+        home / ".claude" / ".credentials.json",
+        home / ".config" / "claude" / "credentials.json",
+        home / ".claude" / "credentials.json",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            # Common shapes: {"access_token": "..."} or
+            # {"claudeAiOauth": {"accessToken": "..."}}
+            if isinstance(data, dict):
+                token = (
+                    data.get("access_token")
+                    or data.get("accessToken")
+                    or data.get("claudeAiOauth", {}).get("accessToken")
+                )
+                if token:
+                    return str(token)
+        except Exception:
+            continue
+    return None
+
+
+def _run_claude_setup_token() -> tuple[bool, str]:
+    """Attempt to launch `claude setup-token` in a subprocess and
+    capture the generated OAuth token. Returns (success, message_or_token)."""
+    claude = shutil.which("claude")
+    if not claude:
+        return False, (
+            "The `claude` CLI was not found on PATH. Install it with "
+            "`npm install -g @anthropic-ai/claude-code` and restart."
+        )
+    try:
+        result = subprocess.run(
+            [claude, "setup-token"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode != 0:
+            return False, (
+                f"`claude setup-token` exited with code "
+                f"{result.returncode}. stderr: {result.stderr[:400]}"
+            )
+        # Token patterns: OAuth tokens typically start with "sk-ant-oat01-"
+        # or similar. Grab the first plausible long token from stdout.
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        match = re.search(r"(sk-ant-[A-Za-z0-9_\-]{20,})", output)
+        if match:
+            return True, match.group(1)
+        # Fall back to reading from the credentials file that setup-token
+        # writes.
+        token = _read_claude_credentials_file()
+        if token:
+            return True, token
+        return False, (
+            "`claude setup-token` ran but no token was captured. "
+            "Open a terminal, run `claude /login`, then come back and "
+            "click 'Detect saved login' below."
+        )
+    except subprocess.TimeoutExpired:
+        return False, (
+            "`claude setup-token` timed out. Run it manually in a "
+            "terminal: `claude setup-token`."
+        )
+    except Exception as e:
+        return False, f"Failed to run `claude setup-token`: {e}"
 
 
 def _extract_epic_key(input_str: str) -> str:
@@ -149,50 +235,210 @@ if _RADIO_KEY not in st.session_state:
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: credentials form
+# Auto-detect saved Claude OAuth token on first load so we can prefill it
 # ---------------------------------------------------------------------------
-st.sidebar.title("Credentials")
-st.sidebar.markdown(
-    "✅ **All credentials loaded from `.streamlit/secrets.toml`**\n\n"
-    "- **Jira Host:** Loaded ✓\n"
-    "- **Jira Email:** Loaded ✓\n"
-    "- **Jira API Token:** Loaded ✓\n"
-    "- **Claude OAuth Token:** Loaded ✓\n\n"
-    "To update, edit `.streamlit/secrets.toml` or use the form below."
-)
+if not st.session_state.get("claude_oauth_token"):
+    disk_token = _read_claude_credentials_file()
+    if disk_token:
+        st.session_state.claude_oauth_token = disk_token
 
-st.session_state.jira_host = st.sidebar.text_input(
-    "Jira URL",
-    value=st.session_state.jira_host,
-    help="e.g. https://your-domain.atlassian.net",
-    disabled=True,
-)
-st.session_state.jira_email = st.sidebar.text_input(
-    "Jira email",
-    value=st.session_state.jira_email,
-    disabled=True,
-)
-st.session_state.jira_token = st.sidebar.text_input(
-    "Jira API token",
-    value="***" if st.session_state.jira_token else "",
-    type="password",
-    help="Loaded from secrets.toml",
-    disabled=True,
-)
-st.session_state.claude_oauth_token = st.sidebar.text_input(
-    "Claude OAuth Token",
-    value="***" if st.session_state.claude_oauth_token else "",
-    type="password",
-    help="Loaded from secrets.toml",
-    disabled=True,
-)
-st.session_state.model = st.sidebar.text_input(
-    "Claude model",
-    value=st.session_state.model,
-    disabled=True,
-)
 
-st.sidebar.success("✅ All credentials are pre-loaded and ready!")
+def _credentials_ok() -> bool:
+    jira_ok = all([
+        st.session_state.get("jira_host"),
+        st.session_state.get("jira_email"),
+        st.session_state.get("jira_token"),
+    ])
+    if not jira_ok:
+        return False
+    return bool(st.session_state.get("claude_oauth_token"))
+
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+st.title("🧠 Jira RAG Agent")
+
+# ---------------------------------------------------------------------------
+# Credential wizard — one field at a time until everything's filled.
+# Once credentials are all set, this collapses into a small sidebar that
+# lets the user reconfigure.
+# ---------------------------------------------------------------------------
+WIZARD_STEPS = [
+    ("jira_host", "Jira URL",
+     "e.g. https://your-domain.atlassian.net", False),
+    ("jira_email", "Jira email",
+     "The email associated with your Atlassian account.", False),
+    ("jira_token", "Jira API token",
+     "Generate at https://id.atlassian.com/manage-profile/security/api-tokens",
+     True),
+    ("claude_oauth_token", "Claude OAuth token",
+     "Run `claude setup-token` in a terminal, or click the button below "
+     "to run it for you.", True),
+]
+
+
+def _current_wizard_step() -> Optional[tuple]:
+    for key, label, help_text, is_password in WIZARD_STEPS:
+        if not st.session_state.get(key):
+            return key, label, help_text, is_password
+    return None
+
+
+if not _credentials_ok():
+    # Wizard mode — ask for missing fields one at a time.
+    st.markdown("### 🔐 Let's set up your credentials")
+    st.caption(
+        "One step at a time. Everything stays in your browser session "
+        "(or locally on disk — never pushed to git)."
+    )
+
+    # Render a progress indicator showing which step we're on.
+    step_indicators = []
+    for key, label, _, _ in WIZARD_STEPS:
+        if st.session_state.get(key):
+            step_indicators.append(f"✅ **{label}**")
+        else:
+            step_indicators.append(f"⬜ {label}")
+    st.markdown(" → ".join(step_indicators))
+    st.markdown("---")
+
+    current = _current_wizard_step()
+    if current is None:
+        st.rerun()
+
+    key, label, help_text, is_password = current
+    st.subheader(f"Step: {label}")
+    st.caption(help_text)
+
+    # For the Claude token step, offer a "login" button that runs
+    # `claude setup-token` and auto-fills.
+    if key == "claude_oauth_token":
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            if st.button(
+                "🔐 Login to Claude now",
+                use_container_width=True,
+                help=(
+                    "Runs `claude setup-token` in the background to generate "
+                    "an OAuth token. Opens a browser window to sign in."
+                ),
+            ):
+                with st.spinner("Running `claude setup-token`..."):
+                    ok, msg = _run_claude_setup_token()
+                if ok:
+                    st.session_state.claude_oauth_token = msg
+                    st.success("Token captured. Continuing...")
+                    st.rerun()
+                else:
+                    st.error(msg)
+        with col_b:
+            if st.button(
+                "🔍 Detect saved login",
+                use_container_width=True,
+                help="Read token from ~/.claude/.credentials.json if present.",
+            ):
+                tok = _read_claude_credentials_file()
+                if tok:
+                    st.session_state.claude_oauth_token = tok
+                    st.success("Saved token found. Continuing...")
+                    st.rerun()
+                else:
+                    st.warning(
+                        "No saved token found. Run `claude /login` in a "
+                        "terminal first, then retry."
+                    )
+
+        st.caption(
+            "Or paste a token manually (generate via `claude setup-token`):"
+        )
+
+    value = st.text_input(
+        label,
+        type="password" if is_password else "default",
+        key=f"wizard_input_{key}",
+        placeholder="Paste here and press Enter",
+    )
+    if value:
+        st.session_state[key] = value
+        st.rerun()
+
+    st.markdown("---")
+    with st.expander("Show all credentials at once"):
+        st.caption(
+            "Prefer a flat form? Fill everything below and submit. Values "
+            "with the ✅ above are already captured."
+        )
+        jh = st.text_input(
+            "Jira URL",
+            value=st.session_state.get("jira_host", "https://healthtap.atlassian.net"),
+            key="flat_jh",
+        )
+        je = st.text_input(
+            "Jira email",
+            value=st.session_state.get("jira_email", ""),
+            key="flat_je",
+        )
+        jt = st.text_input(
+            "Jira API token",
+            value=st.session_state.get("jira_token", ""),
+            type="password",
+            key="flat_jt",
+        )
+        co = st.text_input(
+            "Claude OAuth token",
+            value=st.session_state.get("claude_oauth_token", ""),
+            type="password",
+            key="flat_co",
+        )
+        if st.button("Save all and continue"):
+            if jh and je and jt and co:
+                st.session_state.jira_host = jh
+                st.session_state.jira_email = je
+                st.session_state.jira_token = jt
+                st.session_state.claude_oauth_token = co
+                st.rerun()
+            else:
+                st.error("All fields are required.")
+
+    st.stop()
+
+# ---------------------------------------------------------------------------
+# Sidebar: compact view of live credentials + reconfigure button
+# ---------------------------------------------------------------------------
+st.sidebar.success("✅ Credentials active")
+with st.sidebar.expander("Active credentials (masked)", expanded=False):
+    st.caption(f"**Jira URL:** {st.session_state.jira_host}")
+    st.caption(f"**Jira email:** {st.session_state.jira_email}")
+    _jt = st.session_state.jira_token or ""
+    _ct = st.session_state.claude_oauth_token or ""
+    st.caption(
+        "**Jira token:** `" + "•" * 8 + f"{_jt[-4:] if len(_jt) >= 4 else '****'}`"
+    )
+    st.caption(
+        "**Claude token:** `" + "•" * 8
+        + f"{_ct[-4:] if len(_ct) >= 4 else '****'}`"
+    )
+    st.caption(f"**Model:** {st.session_state.model}")
+
+if st.sidebar.button("🔁 Reconfigure credentials", use_container_width=True):
+    for k in ("jira_host", "jira_email", "jira_token", "claude_oauth_token"):
+        st.session_state.pop(k, None)
+    st.rerun()
+if st.sidebar.button("💾 Save credentials to disk", use_container_width=True):
+    try:
+        _save_secrets_to_disk({
+            "jira_host": st.session_state.jira_host,
+            "jira_email": st.session_state.jira_email,
+            "jira_token": st.session_state.jira_token,
+            "claude_oauth_token": st.session_state.claude_oauth_token,
+            "model": st.session_state.model,
+        })
+        st.sidebar.success(
+            f"Saved to `{SECRETS_PATH}` (gitignored)."
+        )
+    except Exception as e:
+        st.sidebar.error(f"Could not save: {e}")
 
 # Push credentials into the environment so config.py (lazy) picks them up.
 os.environ["JIRA_HOST"] = st.session_state.jira_host or ""
@@ -201,65 +447,35 @@ os.environ["JIRA_API_TOKEN"] = st.session_state.jira_token or ""
 os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = st.session_state.claude_oauth_token or ""
 os.environ["CLAUDE_MODEL"] = st.session_state.model or "claude-sonnet-4-6"
 
-
-def _credentials_ok() -> bool:
-    return all([
-        st.session_state.jira_host,
-        st.session_state.jira_email,
-        st.session_state.jira_token,
-        st.session_state.claude_oauth_token,
-    ])
-
-
-# ---------------------------------------------------------------------------
-# Main header
-# ---------------------------------------------------------------------------
-st.title("🧠 Jira RAG Agent")
-
-# Prominent mode banner so the user always knows what they're using.
+# Banner showing auth mode + extended thinking state.
+thinking_on = os.getenv("CLAUDE_EXTENDED_THINKING", "true").lower() in (
+    "1", "true", "yes", "on"
+)
 if st.session_state.auth_mode == "subscription":
     st.success(
-        "**Auth mode: Claude.ai subscription (Claude Code)** — no API key "
-        "needed. Calls count against your Claude.ai plan."
+        "**Auth mode: Claude.ai subscription (Claude Code)** · "
+        f"Model: `{st.session_state.model}` · "
+        f"Extended thinking: {'🧠 enabled' if thinking_on else 'off'}"
     )
     if not _claude_agent_sdk_available():
         st.error(
-            "⚠️ `claude-agent-sdk` is not installed in this Python venv, "
-            "so subscription mode cannot make LLM calls. Fix it with one "
-            "of these:\n\n"
-            "1. Open a VS Code terminal (Terminal → New Terminal) and run:\n"
-            "   ```\n"
-            "   pip install claude-agent-sdk\n"
-            "   ```\n"
-            "2. Then make sure Claude Code itself is installed and you're "
-            "logged in:\n"
-            "   ```\n"
-            "   npm install -g @anthropic-ai/claude-code\n"
-            "   claude /login\n"
-            "   ```\n"
-            "3. Restart the Streamlit app (Shift + F5, then F5 again).\n\n"
-            "Alternatively, flip the **Claude authentication** radio in "
-            "the sidebar to *'Anthropic API key'* and paste a key."
+            "⚠️ `claude-agent-sdk` is not installed in this Python venv.\n\n"
+            "Fix: open the VS Code terminal and run "
+            "`pip install claude-agent-sdk`, then restart the app."
         )
         st.stop()
 else:
     st.info(
-        "**Auth mode: Anthropic API key** — each call is billed per "
-        "token against the key below. Switch to subscription mode in "
-        "the sidebar if you'd rather use your Claude.ai plan."
+        "**Auth mode: Anthropic API key** · "
+        f"Model: `{st.session_state.model}` · "
+        f"Extended thinking: {'🧠 enabled' if thinking_on else 'off'}"
     )
 
 st.caption(
     "Analyze and compare Jira epics with Claude. Uses a tool-use loop so "
-    "Claude picks the right tool (analyzer / comparator) for your prompt."
+    "Claude picks the right tool (analyzer / comparator / jira_search) "
+    "for your prompt."
 )
-
-if not _credentials_ok():
-    st.info(
-        "Fill in the credentials in the left sidebar and click **Use for "
-        "session** or **Save to disk**. Then come back here."
-    )
-    st.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -376,27 +592,36 @@ with tab_chat:
         with st.chat_message("user"):
             st.markdown(prompt)
         with st.chat_message("assistant"):
-            # Create placeholder and progress tracking
+            # Expanded status box that accumulates every step as a
+            # persistent line, so the user can audit exactly what happened.
+            chat_status = st.status("Thinking...", expanded=True)
+            chat_bar = chat_status.progress(0.0)
+            st.session_state.chat_progress_log = []
+            chat_log_container = chat_status.empty()
+            response_placeholder = st.empty()
             status_placeholder = st.empty()
             progress_placeholder = st.empty()
-            response_placeholder = st.empty()
-            
-            try:
-                # Create a progress tracker callback
-                progress_state = {"status": "", "progress": 0.0, "details": ""}
-                
-                # Use container for real-time updates
-                with st.container():
-                    reply = run_turn(
-                        bundle["session"],
-                        bundle["history"],
-                        prompt,
-                        progress_callback=lambda status, progress, details: (
-                            progress_state.update({"status": status, "progress": progress, "details": details}),
-                            status_placeholder.write(f"📊 {status}"),
-                            progress_placeholder.progress(min(progress, 1.0), text=details if details else None),
-                        )
+
+            def _chat_progress(status: str, progress: float, details: str = "") -> None:
+                line = f"⏳ {status}"
+                if details and details != status:
+                    line += f" — {details}"
+                st.session_state.chat_progress_log.append(line)
+                chat_log_container.markdown(
+                    "\n".join(
+                        f"- {l}" for l in st.session_state.chat_progress_log
                     )
+                )
+                chat_bar.progress(min(progress, 1.0))
+                chat_status.update(label=status)
+
+            try:
+                reply = run_turn(
+                    bundle["session"],
+                    bundle["history"],
+                    prompt,
+                    progress_callback=_chat_progress,
+                )
                 # If files were uploaded, do a supplementary analysis
                 # that combines the tool result with the file contents.
                 if chat_files and reply and not reply.startswith("**Error"):
@@ -436,11 +661,21 @@ with tab_chat:
                     except Exception as e:
                         reply += f"\n\n*(File analysis failed: {e})*"
 
-                # Clear progress indicators once done
+                # Finalise the status box but KEEP IT EXPANDED so the
+                # full step history stays visible to the user.
+                chat_status.update(
+                    label=f"✅ Response ready — "
+                          f"{len(st.session_state.chat_progress_log)} steps",
+                    state="complete",
+                    expanded=True,
+                )
                 status_placeholder.empty()
                 progress_placeholder.empty()
             except Exception as e:
                 reply = f"**Error:** {e}\n\n```\n{traceback.format_exc()}\n```"
+                chat_status.update(
+                    label=f"❌ Error: {e}", state="error", expanded=True
+                )
                 status_placeholder.empty()
                 progress_placeholder.empty()
             response_placeholder.markdown(reply)
@@ -546,15 +781,29 @@ with tab_analyze:
 
     if st.button("Analyze", type="primary", disabled=not epic_key):
         clean_key = _extract_epic_key(epic_key)
+        # expanded=True and we never collapse it — the user asked for all
+        # progress steps to stay visible even after completion.
         status_box = st.status(
             f"Starting analysis of {clean_key}...", expanded=True
         )
-        progress_bar = st.progress(0.0)
-        step_log = st.empty()
+        progress_bar = status_box.progress(0.0)
+
+        # Use a running list so every step persists as a line inside the
+        # status box (instead of being overwritten by the next message).
+        if "analyze_progress_log" not in st.session_state:
+            st.session_state.analyze_progress_log = []
+        st.session_state.analyze_progress_log = []
+        log_container = status_box.empty()
 
         def _on_progress(msg: str, pct: float) -> None:
+            st.session_state.analyze_progress_log.append(f"⏳ {msg}")
+            # Render the full running log each time so nothing disappears.
+            log_container.markdown(
+                "\n".join(
+                    f"- {line}" for line in st.session_state.analyze_progress_log
+                )
+            )
             progress_bar.progress(min(pct, 1.0))
-            step_log.caption(f"⏳ {msg}")
             status_box.update(label=msg)
 
         try:
@@ -566,15 +815,17 @@ with tab_analyze:
                 progress=_on_progress,
             )
             status_box.update(
-                label=f"Analysis of {clean_key} complete!", state="complete"
+                label=f"✅ Analysis of {clean_key} complete — "
+                      f"{len(st.session_state.analyze_progress_log)} steps",
+                state="complete",
+                expanded=True,
             )
         except Exception as e:
-            status_box.update(label=f"Analysis failed: {e}", state="error")
+            status_box.update(
+                label=f"❌ Analysis failed: {e}", state="error", expanded=True
+            )
             st.code(traceback.format_exc())
             result = None
-        finally:
-            progress_bar.empty()
-            step_log.empty()
 
         if result:
             if "error" in result:
@@ -718,12 +969,18 @@ with tab_compare:
         cmp_status = st.status(
             f"Comparing {clean_key_1} vs {clean_key_2}...", expanded=True
         )
-        cmp_bar = st.progress(0.0)
-        cmp_log = st.empty()
+        cmp_bar = cmp_status.progress(0.0)
+        st.session_state.compare_progress_log = []
+        cmp_log_container = cmp_status.empty()
 
         def _on_cmp(msg: str, pct: float) -> None:
+            st.session_state.compare_progress_log.append(f"⏳ {msg}")
+            cmp_log_container.markdown(
+                "\n".join(
+                    f"- {line}" for line in st.session_state.compare_progress_log
+                )
+            )
             cmp_bar.progress(min(pct, 1.0))
-            cmp_log.caption(f"⏳ {msg}")
             cmp_status.update(label=msg)
 
         try:
@@ -734,14 +991,20 @@ with tab_compare:
                 context_options=compare_context,
                 progress=_on_cmp,
             )
-            cmp_status.update(label="Comparison complete!", state="complete")
+            cmp_status.update(
+                label=f"✅ Comparison complete — "
+                      f"{len(st.session_state.compare_progress_log)} steps",
+                state="complete",
+                expanded=True,
+            )
         except Exception as e:
-            cmp_status.update(label=f"Comparison failed: {e}", state="error")
+            cmp_status.update(
+                label=f"❌ Comparison failed: {e}",
+                state="error",
+                expanded=True,
+            )
             st.code(traceback.format_exc())
             result = None
-        finally:
-            cmp_bar.empty()
-            cmp_log.empty()
 
         if result:
             if "error" in result:

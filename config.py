@@ -94,6 +94,17 @@ class _Config:
     def MAX_TEST_CASES_PER_TICKET(self) -> int:
         return _int("MAX_TEST_CASES_PER_TICKET", "15")
 
+    # --- Extended thinking ---
+    @property
+    def CLAUDE_EXTENDED_THINKING(self) -> bool:
+        return os.getenv(
+            "CLAUDE_EXTENDED_THINKING", "true"
+        ).lower() in ("1", "true", "yes", "on")
+
+    @property
+    def CLAUDE_THINKING_BUDGET(self) -> int:
+        return _int("CLAUDE_THINKING_BUDGET", "4096")
+
     # --- Connection timeouts ---
     @property
     def JIRA_TIMEOUT(self) -> int:
